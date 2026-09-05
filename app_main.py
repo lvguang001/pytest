@@ -22,6 +22,7 @@ from PyQt5.QtGui import QFont
 from ui_main_window import Ui_Form
 from services import FileService, DataService, TemplateVariableManager
 from ai_service import AIService
+from case_classifier import CaseClassifier
 from config_service import ConfigService
 from path_utils import path_utils
 from main import UserManager, PasswordLineEdit
@@ -90,7 +91,7 @@ PERSON_CN_SUFFIX = {
     "phone": "手机号",
 }
 # position 语义随角色：扁平兼容键 本人岗位/证人岗位/法人职务
-_FLAT_POSITION_SUFFIX = {"本人": "岗位", "证人": "岗位", "法人": "职务"}
+_FLAT_POSITION_SUFFIX = {"本人": "岗位", "证人": "岗位", "法人": "职务", "家属": "与死者关系"}
 
 
 def person_flat_key(role: str, field: str) -> str:
@@ -117,6 +118,11 @@ ROLE_TALK = {
         'talk_template': '法人谈话笔录（普通工伤案件）.docx',
         'docx_data': '_build_legal_template_data',
     },
+    '家属': {
+        'ai_prompt': 'family_send_to_ai',
+        'talk_template': '家属谈话笔录（普通工伤案件）.docx',
+        'docx_data': '_build_family_template_data',
+    },
 }
 
 
@@ -132,33 +138,15 @@ def render_prompt_template(template: str, data: Dict[str, Any], label: str = '')
 
 
 # ============================================================================
-# 拟用条例 选项与格式互转
+# 拟用条例 选项与格式互转（case_classifier 为单一事实源）
 # ============================================================================
 
-REGULATION_OPTIONS = [
-    "第十四条第（一）项",
-    "第十四条第（二）项",
-    "第十四条第（三）项",
-    "第十四条第（四）项",
-    "第十四条第（五）项",
-    "第十四条第（六）项",
-    "第十四条第（七）项",
-    "第十五条第（一）项",
-    "第十五条第（二）项",
-    "第十五条第（三）项",
-]
-
-# 拟用条例对应的法律要件（存入案件 JSON，供 AI 生成文书时突出关键证据要素）
+# 从条例目录派生：顺序 = 下拉框顺序；要素与 case_classifier 同源
+_REGULATION_CATALOG = CaseClassifier.REGULATIONS
+REGULATION_OPTIONS = list(_REGULATION_CATALOG.keys())
 REGULATION_ELEMENTS = {
-    "第十四条第（一）项": ["工作时间", "工作场所", "因工作原因受到事故伤害"],
-    "第十四条第（二）项": ["工作时间前后", "工作场所内", "从事与工作有关的预备性或收尾性工作", "受到事故伤害"],
-    "第十四条第（三）项": ["工作时间", "工作场所内", "因履行工作职责", "受到暴力等意外伤害"],
-    "第十四条第（四）项": ["患职业病（须符合国家职业病目录）"],
-    "第十四条第（五）项": ["因工外出期间", "由于工作原因受到伤害 / 发生事故下落不明"],
-    "第十四条第（六）项": ["上下班途中", "非本人主要责任", "交通事故（含轨道交通、客运轮渡、火车事故）"],
-    "第十五条第（一）项": ["工作时间", "工作岗位", "突发疾病死亡 / 48小时内经抢救无效死亡"],
-    "第十五条第（二）项": ["在抢险救灾等维护国家利益、公共利益活动中受到伤害"],
-    "第十五条第（三）项": ["原在军队服役", "因战/因公负伤致残", "已取得革命伤残军人证", "到用人单位后旧伤复发"],
+    key: list(reg.get('elements', []))
+    for key, reg in _REGULATION_CATALOG.items()
 }
 
 
@@ -261,433 +249,116 @@ def _to_full_materials(provided_materials):
 # F2 测试数据预设（按 F2 轮换）
 # ============================================================================
 
-TEST_DATA_PRESETS = [
-    # ═══════════════════════════════════════════════════════════════
-    # 条例14条第(一)项 普通工伤 — 张三案（本人+证人+法人）
-    # ═══════════════════════════════════════════════════════════════
-    {
-        "name": "1/18 张三案-本人(第一项)",
-        "role": "本人",
-        "name_pane": "张三",
-        "idnumer_pane": "330324199003151234",
-        "textEdit": "浙江省永嘉县瓯北街道XX路88号",
-        "lineEdit_4": "13888880001",
-        "lineEdit_5": "泥水工",
-        "injured_worker": "张三",
-        "comboBox": 0,
-        "company_pane": "温州YY建筑劳务有限公司",
-        "construction_company": "永嘉县XX建设工程有限公司",
-        "construction_plant": "ZZ新城项目一期工地",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "我单位职工张三，男，1990年3月15日出生，身份证号330324199003151234，住永嘉县瓯北街道XX路88号。2026年7月20日下午16时20分许，张三在ZZ新城项目一期工地3号楼5层搬运水泥时，被滑落的水泥袋砸伤右脚，经永嘉县人民医院诊断为右足跖骨骨折。该事故属于在工作时间和工作场所内因工作原因受到的事故伤害，符合《工伤保险条例》第十四条第（一）项情形，现申请认定工伤。",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "医院诊断证明书", "provided": True, "notes": "永嘉县人民医院 右足跖骨骨折"},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-            {"name": "工资银行流水", "provided": True, "notes": ""},
-            {"name": "考勤记录", "provided": True, "notes": ""},
-        ],
-    },
-    {
-        "name": "2/18 张三案-证人(李四)",
-        "role": "证人",
-        "name_pane": "李四",
-        "idnumer_pane": "330324198508121235",
-        "textEdit": "浙江省永嘉县桥头镇YY村123号",
-        "lineEdit_4": "13966660002",
-        "lineEdit_5": "钢筋工",
-        "injured_worker": "张三",
-        "comboBox": 0,
-        "company_pane": "温州YY建筑劳务有限公司",
-        "construction_company": "永嘉县XX建设工程有限公司",
-        "construction_plant": "ZZ新城项目一期工地",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "证人证言", "provided": True, "notes": ""},
-        ],
-    },
-    {
-        "name": "3/18 张三案-法人(王五)",
-        "role": "法人",
-        "name_pane": "王五",
-        "idnumer_pane": "330324198212011234",
-        "textEdit": "浙江省永嘉县上塘镇XX路66号",
-        "lineEdit_4": "13777770003",
-        "lineEdit_5": "法定代表人",
-        "injured_worker": "张三",
-        "comboBox": 0,
-        "company_pane": "温州YY建筑劳务有限公司",
-        "construction_company": "永嘉县XX建设工程有限公司",
-        "construction_plant": "ZZ新城项目一期工地",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "公司营业执照副本", "provided": True, "notes": ""},
-            {"name": "法定代表人身份证", "provided": True, "notes": ""},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-        ],
-    },
-
-    # ═══════════════════════════════════════════════════════════════
-    # 条例14条第(二)项 工作前后预备性工作 — 刘十案（本人+证人+法人）
-    # ═══════════════════════════════════════════════════════════════
-    {
-        "name": "4/18 刘十案-本人(第二项)",
-        "role": "本人",
-        "name_pane": "刘十",
-        "idnumer_pane": "330324199207052345",
-        "textEdit": "浙江省永嘉县大若岩镇XX村33号",
-        "lineEdit_4": "13511112222",
-        "lineEdit_5": "冲压工",
-        "injured_worker": "刘十",
-        "comboBox": 1,
-        "company_pane": "温州AA金属制品有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "我单位职工刘十，系温州AA金属制品有限公司冲压工。2026年7月25日上午7时40分许（上班时间为8时），刘十按照惯例提前到岗对公司冲压设备进行例行检查和预热，在此过程中右手被机器夹伤，经温州附二医诊断为右手食指和中指挤压伤。该检查和预热工作系其职责范围内的预备性工作，符合《工伤保险条例》第十四条第（二）项情形，现申请认定工伤。",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "医院诊断证明", "provided": True, "notes": "右手食指和中指挤压伤"},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-            {"name": "操作规程手册", "provided": True, "notes": "车间设备预热流程"},
-            {"name": "考勤记录", "provided": True, "notes": "7月25日打卡7:35"},
-        ],
-    },
-    {
-        "name": "5/18 刘十案-证人(钱七)",
-        "role": "证人",
-        "name_pane": "钱七",
-        "idnumer_pane": "330324199906081239",
-        "textEdit": "浙江省永嘉县岩头镇ZZ村88号",
-        "lineEdit_4": "13544440005",
-        "lineEdit_5": "冲压工",
-        "injured_worker": "刘十",
-        "comboBox": 1,
-        "company_pane": "温州AA金属制品有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "证人证言", "provided": True, "notes": ""},
-        ],
-    },
-    {
-        "name": "6/18 刘十案-法人(王五)",
-        "role": "法人",
-        "name_pane": "王五",
-        "idnumer_pane": "330324198212011234",
-        "textEdit": "浙江省永嘉县上塘镇XX路66号",
-        "lineEdit_4": "13777770003",
-        "lineEdit_5": "法定代表人",
-        "injured_worker": "刘十",
-        "comboBox": 1,
-        "company_pane": "温州AA金属制品有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "公司营业执照副本", "provided": True, "notes": ""},
-            {"name": "法定代表人身份证", "provided": True, "notes": ""},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-        ],
-    },
-
-    # ═══════════════════════════════════════════════════════════════
-    # 条例14条第(三)项 暴力伤害 — 周八案（本人+证人+法人）
-    # ═══════════════════════════════════════════════════════════════
-    {
-        "name": "7/18 周八案-本人(第三项)",
-        "role": "本人",
-        "name_pane": "周八",
-        "idnumer_pane": "330324199106011240",
-        "textEdit": "浙江省永嘉县枫林镇XX村55号",
-        "lineEdit_4": "13433330006",
-        "lineEdit_5": "保安",
-        "injured_worker": "周八",
-        "comboBox": 2,
-        "company_pane": "温州EE物业管理有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "我单位职工周八，系温州EE物业管理有限公司保安，派驻永嘉县XX商场担任安保工作。2026年8月1日晚21时许，周八在商场一楼巡逻时发现一名男子正在盗窃商户商品，上前制止时被对方用铁棍击打头部和右臂。商场其他保安闻讯赶来将嫌疑人控制并报警，周八被送至永嘉县人民医院治疗，诊断为脑震荡、右臂桡骨骨折。该伤害属于在履行工作职责过程中因履行工作职责受到暴力伤害，符合《工伤保险条例》第十四条第（三）项情形，现申请认定工伤。",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "医院诊断证明", "provided": True, "notes": "脑震荡、右臂桡骨骨折"},
-            {"name": "公安局报案回执", "provided": True, "notes": "永嘉县公安局"},
-            {"name": "商场监控录像", "provided": True, "notes": "XX商场一楼"},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-        ],
-    },
-    {
-        "name": "8/18 周八案-证人(李四)",
-        "role": "证人",
-        "name_pane": "李四",
-        "idnumer_pane": "330324198508121235",
-        "textEdit": "浙江省永嘉县桥头镇YY村123号",
-        "lineEdit_4": "13966660002",
-        "lineEdit_5": "保安",
-        "injured_worker": "周八",
-        "comboBox": 2,
-        "company_pane": "温州EE物业管理有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "证人证言", "provided": True, "notes": ""},
-        ],
-    },
-    {
-        "name": "9/18 周八案-法人(王五)",
-        "role": "法人",
-        "name_pane": "王五",
-        "idnumer_pane": "330324198212011234",
-        "textEdit": "浙江省永嘉县上塘镇XX路66号",
-        "lineEdit_4": "13777770003",
-        "lineEdit_5": "法定代表人",
-        "injured_worker": "周八",
-        "comboBox": 2,
-        "company_pane": "温州EE物业管理有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "公司营业执照副本", "provided": True, "notes": ""},
-            {"name": "法定代表人身份证", "provided": True, "notes": ""},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-        ],
-    },
-
-    # ═══════════════════════════════════════════════════════════════
-    # 条例14条第(四)项 患职业病 — 孙八案（本人+证人+法人）
-    # ═══════════════════════════════════════════════════════════════
-    {
-        "name": "10/18 孙八案-本人(第四项)",
-        "role": "本人",
-        "name_pane": "孙八",
-        "idnumer_pane": "330324197506011245",
-        "textEdit": "浙江省永嘉县巽宅镇XX村7号",
-        "lineEdit_4": "13622223333",
-        "lineEdit_5": "采掘工",
-        "injured_worker": "孙八",
-        "comboBox": 3,
-        "company_pane": "温州DD矿业有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "我单位职工孙八，系温州DD矿业有限公司采掘工，自2015年起一直从事井下采掘作业，长期接触矽尘粉尘。2026年5月经温州市职业病防治院诊断，确认孙八患有职业性矽肺壹期。该疾病属于在职业活动中接触职业病危害因素所致，符合《工伤保险条例》第十四条第（四）项情形，现申请认定工伤。",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "职业病诊断证明书", "provided": True, "notes": "温州市职业病防治院 矽肺壹期"},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-            {"name": "历年职业健康体检报告", "provided": True, "notes": ""},
-            {"name": "工作场所粉尘检测报告", "provided": True, "notes": ""},
-        ],
-    },
-    {
-        "name": "11/18 孙八案-证人(李四)",
-        "role": "证人",
-        "name_pane": "李四",
-        "idnumer_pane": "330324198508121235",
-        "textEdit": "浙江省永嘉县桥头镇YY村123号",
-        "lineEdit_4": "13966660002",
-        "lineEdit_5": "采掘工",
-        "injured_worker": "孙八",
-        "comboBox": 3,
-        "company_pane": "温州DD矿业有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "证人证言", "provided": True, "notes": ""},
-        ],
-    },
-    {
-        "name": "12/18 孙八案-法人(王五)",
-        "role": "法人",
-        "name_pane": "王五",
-        "idnumer_pane": "330324198212011234",
-        "textEdit": "浙江省永嘉县上塘镇XX路66号",
-        "lineEdit_4": "13777770003",
-        "lineEdit_5": "法定代表人",
-        "injured_worker": "孙八",
-        "comboBox": 3,
-        "company_pane": "温州DD矿业有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "公司营业执照副本", "provided": True, "notes": ""},
-            {"name": "法定代表人身份证", "provided": True, "notes": ""},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-        ],
-    },
-
-    # ═══════════════════════════════════════════════════════════════
-    # 条例14条第(五)项 因工外出 — 钱七案（本人+证人+法人）
-    # ═══════════════════════════════════════════════════════════════
-    {
-        "name": "13/18 钱七案-本人(第五项)",
-        "role": "本人",
-        "name_pane": "钱七",
-        "idnumer_pane": "330324199906081239",
-        "textEdit": "浙江省永嘉县岩头镇ZZ村88号",
-        "lineEdit_4": "13544440005",
-        "lineEdit_5": "技术员",
-        "injured_worker": "钱七",
-        "comboBox": 4,
-        "company_pane": "永嘉县CC环保科技有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "我单位职工钱七，系永嘉县CC环保科技有限公司技术员。2026年7月28日，钱七受单位指派前往乐清市DD化工厂进行设备维护服务。上午9时30分许，其乘坐的公司车辆在乐清市柳市镇境内发生侧翻事故，造成钱七腰椎压缩性骨折，已送乐清市人民医院治疗。该事故属于因工外出期间由于工作原因受到的事故伤害，符合《工伤保险条例》第十四条第（五）项情形，现申请认定工伤。",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "公司派工单", "provided": True, "notes": "2026年7月27日签发"},
-            {"name": "出差申请书", "provided": True, "notes": "经理王五审批"},
-            {"name": "交通事故认定书", "provided": True, "notes": "单方事故 路面湿滑"},
-            {"name": "医院诊断证明", "provided": True, "notes": "腰椎压缩性骨折"},
-        ],
-    },
-    {
-        "name": "14/18 钱七案-证人(李四)",
-        "role": "证人",
-        "name_pane": "李四",
-        "idnumer_pane": "330324198508121235",
-        "textEdit": "浙江省永嘉县桥头镇YY村123号",
-        "lineEdit_4": "13966660002",
-        "lineEdit_5": "技术员",
-        "injured_worker": "钱七",
-        "comboBox": 4,
-        "company_pane": "永嘉县CC环保科技有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "证人证言", "provided": True, "notes": ""},
-        ],
-    },
-    {
-        "name": "15/18 钱七案-法人(王五)",
-        "role": "法人",
-        "name_pane": "王五",
-        "idnumer_pane": "330324198212011234",
-        "textEdit": "浙江省永嘉县上塘镇XX路66号",
-        "lineEdit_4": "13777770003",
-        "lineEdit_5": "经理",
-        "injured_worker": "钱七",
-        "comboBox": 4,
-        "company_pane": "永嘉县CC环保科技有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "公司营业执照副本", "provided": True, "notes": ""},
-            {"name": "经理身份证", "provided": True, "notes": ""},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-        ],
-    },
-
-    # ═══════════════════════════════════════════════════════════════
-    # 条例14条第(六)项 上下班途中 — 赵六案（本人+证人+法人）
-    # ═══════════════════════════════════════════════════════════════
-    {
-        "name": "16/18 赵六案-本人(第六项)",
-        "role": "本人",
-        "name_pane": "赵六",
-        "idnumer_pane": "330324199508031238",
-        "textEdit": "浙江省永嘉县乌牛街道XX小区5栋301室",
-        "lineEdit_4": "13655550004",
-        "lineEdit_5": "装配工",
-        "injured_worker": "赵六",
-        "comboBox": 5,
-        "company_pane": "温州BB电器有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "我单位职工赵六，系温州BB电器有限公司装配工，住永嘉县乌牛街道XX小区5栋301室。2026年8月5日下午17时40分许，赵六下班后骑电动车沿104国道从公司回乌牛街道家中，在104国道乌牛段被一辆小型轿车追尾，经永嘉县交警大队认定对方负全部责任。事故造成赵六左腿胫骨骨折，已送永嘉县人民医院治疗。该事故属于在上下班途中受到非本人主要责任的交通事故伤害，符合《工伤保险条例》第十四条第（六）项情形，现申请认定工伤。",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "道路交通事故认定书", "provided": True, "notes": "对方全责"},
-            {"name": "医院诊断证明", "provided": True, "notes": "左腿胫骨骨折"},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-            {"name": "路线示意图", "provided": True, "notes": "乌牛街道→104国道→公司"},
-        ],
-    },
-    {
-        "name": "17/18 赵六案-证人(李四)",
-        "role": "证人",
-        "name_pane": "李四",
-        "idnumer_pane": "330324198508121235",
-        "textEdit": "浙江省永嘉县桥头镇YY村123号",
-        "lineEdit_4": "13966660002",
-        "lineEdit_5": "装配工",
-        "injured_worker": "赵六",
-        "comboBox": 5,
-        "company_pane": "温州BB电器有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "身份证复印件", "provided": True, "notes": ""},
-            {"name": "证人证言", "provided": True, "notes": ""},
-        ],
-    },
-    {
-        "name": "18/18 赵六案-法人(王五)",
-        "role": "法人",
-        "name_pane": "王五",
-        "idnumer_pane": "330324198212011234",
-        "textEdit": "浙江省永嘉县上塘镇XX路66号",
-        "lineEdit_4": "13777770003",
-        "lineEdit_5": "法定代表人",
-        "injured_worker": "赵六",
-        "comboBox": 5,
-        "company_pane": "温州BB电器有限公司",
-        "construction_company": "",
-        "construction_plant": "",
-        "deathCaseCheckbox": False,
-        "personalApplicationCheckbox": False,
-        "statement_edit": "",
-        "materials": [
-            {"name": "公司营业执照副本", "provided": True, "notes": ""},
-            {"name": "法定代表人身份证", "provided": True, "notes": ""},
-            {"name": "劳动合同", "provided": True, "notes": ""},
-        ],
-    },
-]
+TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
+  'role': '本人',
+  'deathCaseCheckbox': False,
+  'personalApplicationCheckbox': False,
+  'name_pane': '张三',
+  'idnumer_pane': '330324199003151234',
+  'textEdit': '浙江省永嘉县瓯北街道XX路88号',
+  'lineEdit_4': '13888880001',
+  'lineEdit_5': '泥水工',
+  'injured_worker': '张三',
+  'comboBox': 0,
+  'company_pane': '温州YY建筑劳务有限公司',
+  'construction_company': '永嘉县XX建设工程有限公司',
+  'construction_plant': 'ZZ新城项目一期工地',
+  'statement_edit': '我单位职工张三，男，1990年3月15日出生，身份证号330324199003151234。2026年7月20日16时20分许，张三在工地3号楼5层搬运水泥时被滑落的水泥袋砸伤右脚，诊断为右足跖骨骨折。属工作时间工作场所因工作原因受伤，单位申请认定工伤。',
+  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                {'name': '医院诊断证明书', 'provided': True, 'notes': '右足跖骨骨折'},
+                {'name': '劳动合同', 'provided': True, 'notes': ''},
+                {'name': '考勤记录', 'provided': False, 'notes': ''}]},
+ {'name': '个人申请×工伤 本人(刘大)',
+  'role': '本人',
+  'deathCaseCheckbox': False,
+  'personalApplicationCheckbox': True,
+  'name_pane': '刘大',
+  'idnumer_pane': '330324199205151111',
+  'textEdit': '浙江省永嘉县桥下镇YY村6号',
+  'lineEdit_4': '13900001111',
+  'lineEdit_5': '钢筋工',
+  'injured_worker': '刘大',
+  'comboBox': 0,
+  'company_pane': '温州YY建筑劳务有限公司',
+  'construction_company': '永嘉县XX建设工程有限公司',
+  'construction_plant': 'ZZ新城项目一期工地',
+  'statement_edit': '我叫刘大，男，1992年5月15日出生，身份证号330324199205151111。2026年7月20日在工地扎钢筋时被坠落钢管砸伤右手。单位至今未为我申请工伤认定，我作为受伤职工本人自行申请认定工伤，请核实我与单位劳动关系（未签合同、有考勤和工资记录）及参保情况。',
+  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                {'name': '医院诊断证明书', 'provided': True, 'notes': '右手骨折'},
+                {'name': '工资银行流水', 'provided': True, 'notes': ''},
+                {'name': '考勤记录', 'provided': True, 'notes': ''}]},
+ {'name': '单位申请×死亡 家属(死者王五)',
+  'role': '家属',
+  'deathCaseCheckbox': True,
+  'personalApplicationCheckbox': False,
+  'name_pane': '王母',
+  'idnumer_pane': '330324195003016666',
+  'textEdit': '浙江省永嘉县上塘镇AA村12号',
+  'lineEdit_4': '13700002222',
+  'lineEdit_5': '母子',
+  'injured_worker': '王五',
+  'comboBox': 7,
+  'company_pane': '温州YY建筑劳务有限公司',
+  'construction_company': '永嘉县XX建设工程有限公司',
+  'construction_plant': 'ZZ新城项目一期工地',
+  'statement_edit': '我单位职工王五，男，1975年1月1日出生。2026年8月2日上午在工地工作时突发疾病，经送医抢救无效于当日18时死亡（诊断：心源性猝死）。单位拟申请认定工亡，故由我单位作为申请人。',
+  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                {'name': '死亡证明', 'provided': True, 'notes': ''},
+                {'name': '抢救病历', 'provided': True, 'notes': '心源性猝死'},
+                {'name': '劳动合同', 'provided': True, 'notes': ''}]},
+ {'name': '个人申请×死亡 家属(死者赵六)',
+  'role': '家属',
+  'deathCaseCheckbox': True,
+  'personalApplicationCheckbox': True,
+  'name_pane': '赵妻',
+  'idnumer_pane': '330324198511223333',
+  'textEdit': '浙江省永嘉县黄田街道CC路3号',
+  'lineEdit_4': '13600003333',
+  'lineEdit_5': '夫妻',
+  'injured_worker': '赵六',
+  'comboBox': 7,
+  'company_pane': '温州YY建筑劳务有限公司',
+  'construction_company': '永嘉县XX建设工程有限公司',
+  'construction_plant': 'ZZ新城项目一期工地',
+  'statement_edit': '我丈夫赵六，男，1981年11月22日出生。2026年8月2日在工地作业时突发疾病，送医抢救无效于当日18时死亡。单位未及时申报，我作为死者近亲属（配偶）自行申请认定工亡，请核实劳动关系、参保及单位是否未及时申报情况。',
+  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                {'name': '死亡证明', 'provided': True, 'notes': ''},
+                {'name': '结婚证', 'provided': True, 'notes': '近亲属关系'},
+                {'name': '工资银行流水', 'provided': True, 'notes': ''}]},
+ {'name': '单位申请×工伤 证人(李四/张三)',
+  'role': '证人',
+  'deathCaseCheckbox': False,
+  'personalApplicationCheckbox': False,
+  'name_pane': '李四',
+  'idnumer_pane': '330324198608155555',
+  'textEdit': '浙江省永嘉县瓯北街道DD路9号',
+  'lineEdit_4': '13500004444',
+  'lineEdit_5': '钢筋工',
+  'injured_worker': '张三',
+  'comboBox': 0,
+  'company_pane': '温州YY建筑劳务有限公司',
+  'construction_company': '永嘉县XX建设工程有限公司',
+  'construction_plant': 'ZZ新城项目一期工地',
+  'statement_edit': '我单位职工张三于2026年7月20日在工地受伤，单位申请认定工伤。',
+  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                {'name': '劳动合同', 'provided': True, 'notes': ''}]},
+ {'name': '个人申请×工伤 证人(钱七/刘大)',
+  'role': '证人',
+  'deathCaseCheckbox': False,
+  'personalApplicationCheckbox': True,
+  'name_pane': '钱七',
+  'idnumer_pane': '330324199009167777',
+  'textEdit': '浙江省永嘉县乌牛街道EE弄5号',
+  'lineEdit_4': '13400005555',
+  'lineEdit_5': '泥水工',
+  'injured_worker': '刘大',
+  'comboBox': 0,
+  'company_pane': '温州YY建筑劳务有限公司',
+  'construction_company': '永嘉县XX建设工程有限公司',
+  'construction_plant': 'ZZ新城项目一期工地',
+  'statement_edit': '刘大于2026年7月20日在工地受伤后自行申请认定工伤，我作为工友可佐证其考勤与受伤经过。',
+  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                {'name': '劳动合同', 'provided': False, 'notes': ''}]}]
 
 
 # ============================================================================
@@ -825,7 +496,7 @@ class CaseDataModel:
 
     def clear_role_data(self, role: str):
         """清除特定角色的数据"""
-        role_prefix = role if role in ["本人", "证人", "法人"] else ""
+        role_prefix = role if role in ["本人", "证人", "法人", "家属"] else ""
         if not role_prefix:
             return
 
@@ -1260,13 +931,9 @@ class MainWindow(QWidget, Ui_Form):
         self.construction_company.currentTextChanged.connect(self.sync_employer_to_dict)
         self.construction_plant.currentTextChanged.connect(self.c_plant)
 
-        # 初始化案件类型下拉框
-        self.comboBox.addItem("《工伤保险条例》第十四条第一款第一项")
-        self.comboBox.addItem("《工伤保险条例》第十四条第一款第二项")
-        self.comboBox.addItem("《工伤保险条例》第十四条第一款第三项")
-        self.comboBox.addItem("《工伤保险条例》第十四条第一款第四项")
-        self.comboBox.addItem("《工伤保险条例》第十四条第一款第五项")
-        self.comboBox.addItem("《工伤保险条例》第十四条第一款第六项")
+        # 初始化案件类型下拉框（全部条例情形，来自 case_classifier）
+        for _short in REGULATION_OPTIONS:
+            self.comboBox.addItem(_regulation_short_to_full(_short))
 
         # 初始化组合框（必须在 init_combobox_data 之后）
         self.init_comboboxes()
@@ -1311,12 +978,22 @@ class MainWindow(QWidget, Ui_Form):
     def on_talk_button_clicked(self):
         """谈话笔录按钮点击事件处理 — 数据核对 + 按角色生成笔录"""
         try:
-            # 证人/法人：核对前先把表单里新录的数据写回数据模型（open_data_review 保存后会把表单回填成本人数据）
+            # 证人/法人/家属：核对前先把表单里新录的数据写回数据模型（open_data_review 保存后会把表单回填成本人数据）
             current_role = self.get_current_role_type()
             if current_role == "证人":
                 self._sync_form_to_current_witness()
             elif current_role == "法人":
                 self.update_role_info('法人')
+            elif current_role == "家属":
+                self.update_role_info('家属')
+
+            # 工亡案件：职工本人已故，不能制作本人谈话笔录 → 提示改用 家属/证人/法人
+            if current_role == "本人" and self.death_case_checkbox.isChecked():
+                QMessageBox.warning(
+                    self, "提示",
+                    "工亡案件职工本人已故，无法制作本人谈话笔录。\n请改选『家属』（或证人/法人）作为被谈话人。"
+                )
+                return
 
             # ── 第一步：弹出数据核对窗口，逐项核对并允许修改 ──
             if not self.open_data_review():
@@ -1335,6 +1012,11 @@ class MainWindow(QWidget, Ui_Form):
                 self._sync_legal_to_form()
                 # 法人：跳过条例分析，直接生成法人谈话笔录
                 self._generate_role_transcript('法人')
+            elif role == "家属":
+                # 数据核对会把表单回填成本人数据，这里把表单切回家属显示
+                self._sync_family_to_form()
+                # 家属：跳过条例分析，直接生成家属谈话笔录（工亡案）
+                self._generate_role_transcript('家属')
             else:
                 # 本人：AI 条例判断 + 证据分析（分析完成后走同一 txt 提示词生成）
                 self._analyze_case_with_ai(self.current_case_id)
@@ -1434,6 +1116,14 @@ class MainWindow(QWidget, Ui_Form):
         person['materials'] = self.data_model.investigation.get('法人材料', [])
         return [person]
 
+    def _collect_family_reps(self) -> List[Dict[str, Any]]:
+        """收集家属（近亲属）信息（工亡案单条，统一为规范人记录）"""
+        person = self._person_from_flat('家属')
+        if not person.get('name'):
+            return []
+        person['role'] = '家属'
+        return [person]
+
     def _set_combo_or_type(self, combobox, text):
         """设置下拉框的值：存在则选中，否则输入（可编辑）或新增项（不可编辑）"""
         text = text or ""
@@ -1523,6 +1213,15 @@ class MainWindow(QWidget, Ui_Form):
                     self.set_data(person_flat_key('法人', field), val, 'basic')
             self.data_model.investigation['法人材料'] = lr.get('materials', [])
 
+        # 家属信息回写（工亡案单条 → 家属* 扁平兼容键，含 与死者关系）
+        family_reps = case_obj.get('family_reps', [])
+        if family_reps:
+            fr = family_reps[0]
+            for field in PERSON_BASE_FIELDS:
+                val = fr.get(field)
+                if val:
+                    self.set_data(person_flat_key('家属', field), val, 'basic')
+
         # 刷新模板字典缓存
         self._template_dict = self.data_model.to_template_dict()
         print("✅ 核对数据已回写主界面与数据模型")
@@ -1574,6 +1273,33 @@ class MainWindow(QWidget, Ui_Form):
             return True
         except Exception as e:
             print(f"⚠️ 更新案件字段失败（非致命）: {e}")
+            return False
+
+    def _update_case_in_data(self, case_number: str, person_name: str,
+                             folder_path: str, transcript_file: str) -> bool:
+        """工亡基本信息入口：把案件条目写入 cases_data.json（不存在则建档，存在则补目录/文书字段）"""
+        try:
+            cases = self._load_cases_data()
+            case_obj = cases.get(case_number)
+            is_personal = self.personal_application_checkbox.isChecked()
+            if case_obj is None:
+                case_obj = {
+                    "case_id": case_number,
+                    "name": person_name,
+                    "case_nature": '工亡案件' if self.death_case_checkbox.isChecked() else '工伤案件',
+                    "applicant_type": '个人申请' if is_personal else '单位申请',
+                    # 个人×工亡的申请人语义占位为职工(近亲属语义待工亡阶段细化)
+                    "applicant_name": person_name if is_personal else self.get_data('用人单位', ''),
+                    "folder_name": os.path.basename(folder_path) if folder_path else '',
+                    "materials": [], "witnesses": [], "legal_reps": [],
+                }
+                cases[case_number] = case_obj
+            case_obj["folder_name"] = os.path.basename(folder_path) if folder_path else case_obj.get("folder_name", '')
+            case_obj["transcript_file"] = transcript_file
+            self._save_cases_data(cases)
+            return True
+        except Exception as e:
+            print(f"⚠️ 更新工亡案件数据失败: {e}")
             return False
 
     def _build_unified_template_data(self, case_obj: Dict[str, Any]) -> Dict[str, Any]:
@@ -1677,6 +1403,7 @@ class MainWindow(QWidget, Ui_Form):
             "recorder": self._get_current_username(),
             "witnesses": list(self.data_model.witnesses),
             "legal_reps": self._collect_legal_reps(),
+            "family_reps": self._collect_family_reps(),
         }
         return case
 
@@ -1767,6 +1494,22 @@ class MainWindow(QWidget, Ui_Form):
                 '法人姓名': self.get_data('法人姓名', ''),
                 '法人职务': self.get_data('法人职务', ''),
                 '法人身份证号': self.get_data('法人身份证号', ''),
+            }
+        if role == '家属':
+            return {
+                '案本号': case_obj.get('case_id', ''),
+                '案件性质': case_obj.get('case_nature', ''),
+                '申请类型': case_obj.get('applicant_type', ''),
+                '本人姓名': case_obj.get('name', ''),      # 死者姓名（受伤职工）
+                '本人性别': case_obj.get('gender', ''),
+                '本人身份证号': case_obj.get('id_card', ''),
+                '用人单位': case_obj.get('labor_unit', ''),
+                '用工单位': case_obj.get('employer', ''),
+                '工地名称': case_obj.get('site', ''),
+                '受伤经过': case_obj.get('injury_description', ''),
+                '家属姓名': self.get_data('家属姓名', ''),
+                '家属身份证号': self.get_data('家属身份证号', ''),
+                '与死者关系': self.get_data('家属与死者关系', ''),
             }
         # 本人：复用统一模板数据（中文+英文 key 富余项替换无害）
         return self._build_unified_template_data(case_obj)
@@ -1939,6 +1682,12 @@ class MainWindow(QWidget, Ui_Form):
             return
         self._write_person_to_form(self._person_from_flat('法人'))
 
+    def _sync_family_to_form(self):
+        """数据核对后把表单切回家属数据（open_data_review 会把表单回填成本人数据）"""
+        if self.get_current_role_type() != "家属":
+            return
+        self._write_person_to_form(self._person_from_flat('家属'))
+
     def _build_legal_template_data(self, case_obj: dict) -> dict:
         """构建法人谈话笔录模板的占位符数据"""
         return {
@@ -1952,6 +1701,22 @@ class MainWindow(QWidget, Ui_Form):
             '法人身份证地址': self.get_data('法人身份证地址', ''),
             '法人手机号': self.get_data('法人手机号', ''),
             '法人职务': self.get_data('法人职务', ''),
+            '公司名称': case_obj.get('labor_unit', ''),  # 用人单位（签合同的单位）
+        }
+
+    def _build_family_template_data(self, case_obj: dict) -> dict:
+        """构建家属谈话笔录模板的占位符数据（被询问人=工亡职工近亲属；本人姓名 指死者）"""
+        return {
+            '当前时期': self.get_data('当前时期', '') or (_date_now() + _time_now()),
+            '用户名': self._get_current_username(),
+            '本人姓名': case_obj.get('name', ''),      # 死者姓名
+            '家属姓名': self.get_data('家属姓名', ''),
+            '家属性别': self.get_data('家属性别', ''),
+            '家属年龄': self.get_data('家属年龄', ''),
+            '家属身份证号': self.get_data('家属身份证号', ''),
+            '家属身份证地址': self.get_data('家属身份证地址', ''),
+            '家属手机号': self.get_data('家属手机号', ''),
+            '与死者关系': self.get_data('家属与死者关系', ''),
             '公司名称': case_obj.get('labor_unit', ''),  # 用人单位（签合同的单位）
         }
 
@@ -2081,7 +1846,8 @@ class MainWindow(QWidget, Ui_Form):
         print(f"{'=' * 50}")
 
         # ── 角色单选按钮 ──
-        role_map = {"本人": self.radioButton, "证人": self.radioButton_2, "法人": self.radioButton_3}
+        role_map = {"本人": self.radioButton, "证人": self.radioButton_2,
+                    "法人": self.radioButton_3, "家属": self.radioButton_4}
         for role_name, btn in role_map.items():
             btn.setChecked(role_name == data["role"])
         # 程序化 setChecked 不会触发 clicked，手动触发一次角色切换清理
@@ -2125,8 +1891,11 @@ class MainWindow(QWidget, Ui_Form):
             # 指向该证人，避免索引无效导致生成/回填拿不到证人数据
             self.data_model.current_witness_index = self.data_model.witnesses.index(w)
         else:
-            # 本人 / 法人：表单 → 角色前缀扁平兼容键（统一走 _read_form_as_person）
+            # 本人 / 法人 / 家属：表单 → 角色前缀扁平兼容键（统一走 _read_form_as_person）
             self._person_to_flat(role, self._read_form_as_person())
+            # 家属(工亡)：以死者(injured_worker)为本人姓名，供案号/文案指向死者
+            if role == "家属" and data.get('injured_worker'):
+                self.set_data('本人姓名', data['injured_worker'], 'basic')
 
         # ── 右侧面板（同案沿用） ──
         current_worker = data.get("injured_worker", "")
@@ -2135,6 +1904,7 @@ class MainWindow(QWidget, Ui_Form):
         if not is_same_case:
             self.current_case_id = ""  # 换了受伤职工 → 视为新案件，重置案本号关联
             self.set_data('案本号', '', 'case')  # 同时清掉数据模型里缓存的旧案本号
+            self.lineEdit_2.clear()  # 测试轮换时清掉界面案本号，点击后重新生成
 
         if hasattr(self, 'statement_edit'):
             stmt = data.get("statement_edit", "")
@@ -2240,17 +2010,13 @@ class MainWindow(QWidget, Ui_Form):
                 QMessageBox.warning(dialog, "提示", "请先输入受伤职工姓名")
                 return
 
-            # 查找笔录文件
-            person_files = []
-            for file in os.listdir(self.current_case_folder):
-                if "本人" in file and file.endswith('.docx') and "审批表" not in file:
-                    person_files.append(file)
-
+            # 查找主询问对象笔录（工亡案=家属，普通案=本人）
+            person_files = self._main_transcript_candidates()
             if not person_files:
-                QMessageBox.warning(dialog, "提示", "未找到本人笔录文件")
+                QMessageBox.warning(dialog, "提示", "未找到可插入问题的谈话笔录文件")
                 return
 
-            # 使用第一个找到的本人笔录
+            # 使用第一个找到的主询问对象笔录
             file_path = os.path.join(self.current_case_folder, person_files[0])
 
             # 插入问题到文档
@@ -2766,6 +2532,8 @@ class MainWindow(QWidget, Ui_Form):
             self.radioButton.clicked.disconnect()
             self.radioButton_2.clicked.disconnect()
             self.radioButton_3.clicked.disconnect()
+            if hasattr(self, 'radioButton_4'):
+                self.radioButton_4.clicked.disconnect()
         except:
             pass
 
@@ -2773,6 +2541,8 @@ class MainWindow(QWidget, Ui_Form):
         self.radioButton.clicked.connect(self.clear_role_fields)
         self.radioButton_2.clicked.connect(self.clear_role_fields)
         self.radioButton_3.clicked.connect(self.clear_role_fields)
+        if hasattr(self, 'radioButton_4'):
+            self.radioButton_4.clicked.connect(self.clear_role_fields)
         print("✅ 单选按钮信号重新连接")
 
     def _setup_api_config_ui(self):
@@ -3132,6 +2902,24 @@ class MainWindow(QWidget, Ui_Form):
             self.ai_service = None
             self._update_api_status()
 
+    def _main_transcript_candidates(self) -> list:
+        """案件目录下可作为主询问对象笔录的文件：优先 家属(工亡案)，其次 本人；
+        均无则退回第一份非 审批表/告知书/通知书 的谈话笔录。"""
+        if not self.current_case_folder or not os.path.isdir(self.current_case_folder):
+            return []
+        cands, family, main_self = [], [], []
+        for file in sorted(os.listdir(self.current_case_folder)):
+            if not file.endswith('.docx'):
+                continue
+            if any(k in file for k in ("审批表", "告知书", "通知书")):
+                continue
+            cands.append(file)
+            if "家属" in file:
+                family.append(file)
+            elif "本人" in file:
+                main_self.append(file)
+        return (family or main_self or cands[:1])
+
     def ai_review_document(self):
         """AI审查文档"""
         try:
@@ -3155,22 +2943,16 @@ class MainWindow(QWidget, Ui_Form):
 
             print(f"📁 案件文件夹: {self.current_case_folder}")
 
-            # 查找本人笔录文件
-            person_files = []
-            for file in os.listdir(self.current_case_folder):
-                print(f"📄 检查文件: {file}")
-                if "本人" in file and file.endswith('.docx') and "审批表" not in file:
-                    person_files.append(file)
-                    print(f"✅ 找到本人笔录: {file}")
-
+            # 查找主询问对象笔录（工亡案=家属，普通案=本人）
+            person_files = self._main_transcript_candidates()
             if not person_files:
-                print("❌ 未找到本人笔录文件")
-                QMessageBox.warning(self, "AI审查", "未找到本人笔录文件。")
+                print("❌ 未找到可审查的谈话笔录文件")
+                QMessageBox.warning(self, "AI审查", "未找到可审查的谈话笔录文件。")
                 return
 
-            print(f"✅ 找到{len(person_files)}个本人笔录文件")
+            print(f"✅ 找到{len(person_files)}个谈话笔录文件")
 
-            # 使用第一个找到的本人笔录
+            # 使用第一个找到的主询问对象笔录
             file_path = os.path.join(self.current_case_folder, person_files[0])
             print(f"📄 使用文件路径: {file_path}")
 
@@ -3595,7 +3377,7 @@ class MainWindow(QWidget, Ui_Form):
 
     def _clear_role_data(self, role: str):
         """清除指定角色在数据模型与模板字典中的所有数据，确保多人数据一一对应"""
-        if role not in ("本人", "证人", "法人"):
+        if role not in ("本人", "证人", "法人", "家属"):
             return
         self.data_model.clear_role_data(role)
         for key in [k for k in list(self._template_dict.keys()) if k.startswith(role)]:
@@ -4038,7 +3820,7 @@ class MainWindow(QWidget, Ui_Form):
 
     def _detect_data_category(self, key: str) -> str:
         """自动检测数据类别"""
-        role_prefixes = ['本人', '证人', '法人']
+        role_prefixes = ['本人', '证人', '法人', '家属']
         for prefix in role_prefixes:
             if key.startswith(prefix):
                 base_key = key[len(prefix):]
@@ -4080,7 +3862,7 @@ class MainWindow(QWidget, Ui_Form):
 
     def _store_to_data_model(self, key: str, value: Any, category: str) -> None:
         """存储数据到数据模型"""
-        role_prefixes = ['本人', '证人', '法人']
+        role_prefixes = ['本人', '证人', '法人', '家属']
         for prefix in role_prefixes:
             if key.startswith(prefix):
                 self.data_model.basic_info[key] = value
@@ -4230,16 +4012,11 @@ class MainWindow(QWidget, Ui_Form):
                 QMessageBox.warning(self, "提示", "未配置AI，无法分析认定/不予认定，不能生成案件审批表。")
                 return
 
-            # 解析适用条款情形，供 AI 突出关键证据要素
-            from case_classifier import CaseClassifier
+            # 解析适用条款情形，供 AI 突出关键证据要素（按规范短名取，15条等全部情形均可用）
             regulation = case_data.get('regulation', '')
-            reg_desc = ""
-            reg_elements = []
-            for _idx, _reg in CaseClassifier.REGULATIONS.items():
-                if _reg.get("text") == regulation:
-                    reg_desc = _reg.get("desc", "")
-                    reg_elements = _reg.get("elements", [])
-                    break
+            _reg = CaseClassifier.REGULATIONS.get(case_obj.get('proposed_article', ''), {})
+            reg_desc = _reg.get('desc', '')
+            reg_elements = _reg.get('elements', [])
 
             # 读取该案全部谈话笔录（本人/证人/法人）
             all_text = self._read_all_transcripts(case_folder)
@@ -4662,6 +4439,8 @@ class MainWindow(QWidget, Ui_Form):
             return "证人"
         elif self.radioButton_3.isChecked():
             return "法人"
+        elif hasattr(self, 'radioButton_4') and self.radioButton_4.isChecked():
+            return "家属"
         return "本人"
     def smart_search_cases(self):
         """按案本号在 cases_data.json 中模糊搜索，并回填主界面"""
@@ -4728,8 +4507,8 @@ class MainWindow(QWidget, Ui_Form):
         layout.addWidget(title)
 
         table = QTableWidget()
-        table.setColumnCount(4)
-        table.setHorizontalHeaderLabels(['案本号', '姓名', '用人单位', '拟用条例'])
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels(['案本号', '姓名', '案件性质', '申请类型', '用人单位', '拟用条例'])
         table.setRowCount(len(matched))
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setSelectionMode(QTableWidget.SingleSelection)
@@ -4739,8 +4518,10 @@ class MainWindow(QWidget, Ui_Form):
         for i, (case_id, case_obj) in enumerate(matched):
             table.setItem(i, 0, QTableWidgetItem(str(case_id)))
             table.setItem(i, 1, QTableWidgetItem(str(case_obj.get('name', ''))))
-            table.setItem(i, 2, QTableWidgetItem(str(case_obj.get('labor_unit', ''))))
-            table.setItem(i, 3, QTableWidgetItem(str(case_obj.get('proposed_article', ''))))
+            table.setItem(i, 2, QTableWidgetItem(str(case_obj.get('case_nature', ''))))
+            table.setItem(i, 3, QTableWidgetItem(str(case_obj.get('applicant_type', ''))))
+            table.setItem(i, 4, QTableWidgetItem(str(case_obj.get('labor_unit', ''))))
+            table.setItem(i, 5, QTableWidgetItem(str(case_obj.get('proposed_article', ''))))
 
         table.resizeColumnsToContents()
         table.horizontalHeader().setStretchLastSection(True)

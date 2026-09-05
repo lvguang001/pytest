@@ -106,6 +106,9 @@ class Ui_Form(object):
         self.radioButton_3 = QtWidgets.QRadioButton(Form)
         self.radioButton_3.setGeometry(QtCore.QRect(221, 174, 47, 16))
         self.radioButton_3.setObjectName("radioButton_3")
+        self.radioButton_4 = QtWidgets.QRadioButton(Form)
+        self.radioButton_4.setGeometry(QtCore.QRect(72, 193, 60, 16))
+        self.radioButton_4.setObjectName("radioButton_4")
         self.lineEdit_2 = QtWidgets.QLineEdit(Form)
         self.lineEdit_2.setEnabled(True)
         self.lineEdit_2.setGeometry(QtCore.QRect(80, 130, 81, 20))
@@ -165,6 +168,7 @@ class Ui_Form(object):
         self.radioButton.clicked.connect(Form.clear_role_fields) # type: ignore
         self.radioButton_2.clicked.connect(Form.clear_role_fields) # type: ignore
         self.radioButton_3.clicked.connect(Form.clear_role_fields) # type: ignore
+        self.radioButton_4.clicked.connect(Form.clear_role_fields) # type: ignore
         self.pushButton_12.clicked.connect(Form.on_pushButton_12_clicked) # type: ignore
         QtCore.QMetaObject.connectSlotsByName(Form)
 
@@ -188,6 +192,7 @@ class Ui_Form(object):
         self.pushButton_11.setText(_translate("Form", "案件审批表"))
         self.pushButton_12.setText(_translate("Form", "谈话通知书"))
         self.radioButton_3.setText(_translate("Form", "法人"))
+        self.radioButton_4.setText(_translate("Form", "家属"))
         self.label_10.setText(_translate("Form", "受伤职工："))
         self.label_13.setText(_translate("Form", "岗    位："))
         self.pushButton_2.setText(_translate("Form", "保存"))
