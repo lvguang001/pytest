@@ -1087,7 +1087,8 @@ class MainWindow(QWidget, Ui_Form):
             'regulation': regulation_short,
             'apply_time': self._resolve_date_input(self.apply_time_edit.text()) if hasattr(self, 'apply_time_edit') else '',
             'accept_time': self._resolve_date_input(self.accept_time_edit.text()) if hasattr(self, 'accept_time_edit') else '',
-            'visit_time': self._resolve_date_input(self.visit_time_edit.text()) if hasattr(self, 'visit_time_edit') else '',
+            'visit_time': self._normalize_compact_time(self.visit_time_edit.text()) if hasattr(self, 'visit_time_edit') else '',
+            'injury_time': self._normalize_compact_time(self.injury_time_edit.text()) if hasattr(self, 'injury_time_edit') else '',
             'name': self.get_data('本人姓名', '') or self.name_pane.text().strip(),
             'gender': self.get_data('本人性别', '') or self.lineEdit.text().strip(),
             'age': str(self.get_data('本人年龄', '') or self.age_pane.text().strip()),
@@ -1164,6 +1165,8 @@ class MainWindow(QWidget, Ui_Form):
             self.apply_time_edit.setText(str(case_obj.get('apply_time', '')))
         if hasattr(self, 'accept_time_edit'):
             self.accept_time_edit.setText(str(case_obj.get('accept_time', '')))
+        if hasattr(self, 'injury_time_edit'):
+            self.injury_time_edit.setText(str(case_obj.get('injury_time', '')))
         if hasattr(self, 'visit_time_edit'):
             self.visit_time_edit.setText(str(case_obj.get('visit_time', '')))
         self._save_date_inputs()
@@ -1387,6 +1390,7 @@ class MainWindow(QWidget, Ui_Form):
             "apply_time": data.get('apply_time', ''),
             "accept_time": data.get('accept_time', ''),
             "visit_time": data.get('visit_time', ''),
+            "injury_time": data.get('injury_time', ''),
             "proposed_article": data.get('regulation', ''),
             "proposed_article_elements": _regulation_elements(data.get('regulation', '')),
             # ── 本人（一套完整数据）──
@@ -1514,12 +1518,37 @@ class MainWindow(QWidget, Ui_Form):
         # 本人：复用统一模板数据（中文+英文 key 富余项替换无害）
         return self._build_unified_template_data(case_obj)
 
+    def _time_check_instruction(self, case_obj: dict) -> str:
+        """生成笔录时的时间核对要求：
+        1) 受伤时间(字段) 与 案件陈述中的受伤时间不一致 → 请 AI 追加一问核实；
+        2) 受伤时间 与 就诊时间 间隔明显不合理 → 请 AI 追加一问解释延迟就诊。"""
+        injury = str(case_obj.get('injury_time', '') or '').strip()
+        visit = str(case_obj.get('visit_time', '') or '').strip()
+        lines = []
+        if injury:
+            lines.append(
+                f"本案填写的受伤时间为：{injury}（年月日时分）。请将它与本案受伤经过/案件陈述文字中提到的受伤时间核对："
+                f"若陈述中的时间与本处填写的受伤时间不一致，请在笔录问答中加入一问，请被询问人确认哪个受伤时间准确并说明为何不一致；"
+                f"若一致则无需就此提问。"
+            )
+        if injury and visit:
+            lines.append(
+                f"本案就诊时间为：{visit}。请判断受伤后是否在合理时间内就医：若受伤时间与就诊时间相隔明显不合理"
+                f"（如受伤后过了较长时间才就诊且无正当理由），请在笔录问答中加入一问，请被询问人解释延迟就诊的原因；"
+                f"若间隔合理则无需就此提问。"
+            )
+        return "\n".join(lines)
+
     def _build_prompt_for_role(self, role: str, case_obj: dict) -> str:
         """按角色返回发给 AI 的 txt 提示词（ROLE_TALK 定 key，统一渲染并校验残留占位符）"""
         from prompt_manager import load_prompt
         meta = ROLE_TALK.get(role, ROLE_TALK['本人'])
         prompt = load_prompt(meta['ai_prompt'])
-        return render_prompt_template(prompt, self._prompt_fill_data(role, case_obj), role)
+        prompt = render_prompt_template(prompt, self._prompt_fill_data(role, case_obj), role)
+        time_extra = self._time_check_instruction(case_obj)
+        if time_extra:
+            prompt += "\n\n【时间核对补充要求】\n" + time_extra
+        return prompt
 
     def _generate_role_transcript(self, role: str):
         """统一的谈话笔录生成入口（证人/法人由此进入；本人经条例分析后直接调 _start_transcript_generation）"""
@@ -2695,8 +2724,8 @@ class MainWindow(QWidget, Ui_Form):
         # ============================================================
         # 7. 左栏：申请 / 受理 / 就诊 时间
         # ============================================================
-        DATE_H = 100
-        self.date_group = QGroupBox("申请 / 受理 / 就诊时间", self)
+        DATE_H = 132
+        self.date_group = QGroupBox("申请 / 受理 / 受伤 / 就诊时间", self)
         self.date_group.setGeometry(70, 655, 390, DATE_H)
         self.date_group.setFont(QFont("微软雅黑", 9))
 
@@ -2718,19 +2747,28 @@ class MainWindow(QWidget, Ui_Form):
         self.accept_time_edit.setToolTip("输入8位日期如20260816；留空则使用系统当前日期")
         self.accept_time_edit.editingFinished.connect(self._save_date_inputs)
 
+        lbl_injury = QLabel("受伤时间：", self.date_group)
+        lbl_injury.setGeometry(8, 82, 60, 20)
+
+        self.injury_time_edit = QLineEdit(self.date_group)
+        self.injury_time_edit.setGeometry(68, 80, 300, 22)
+        self.injury_time_edit.setPlaceholderText("12位如202609051105")
+        self.injury_time_edit.setToolTip("年月日时分，如 202609051105；留空则不填")
+        self.injury_time_edit.editingFinished.connect(self._save_date_inputs)
+
         lbl_visit = QLabel("就诊时间：", self.date_group)
-        lbl_visit.setGeometry(8, 82, 60, 20)
+        lbl_visit.setGeometry(8, 108, 60, 20)
 
         self.visit_time_edit = QLineEdit(self.date_group)
-        self.visit_time_edit.setGeometry(68, 80, 300, 22)
-        self.visit_time_edit.setPlaceholderText("留空=当前")
-        self.visit_time_edit.setToolTip("输入8位日期如20260816；留空则使用系统当前日期")
+        self.visit_time_edit.setGeometry(68, 106, 300, 22)
+        self.visit_time_edit.setPlaceholderText("12位如202609051105")
+        self.visit_time_edit.setToolTip("年月日时分，如 202609051105；留空则不填")
         self.visit_time_edit.editingFinished.connect(self._save_date_inputs)
 
         print("✅ API配置UI已创建")
 
     def _resolve_date_input(self, raw_value: str) -> str:
-        """把输入框内容解析为日期字符串；为空时返回系统当前日期"""
+        """把输入框内容解析为日期字符串；为空时返回系统当前日期（用于 申请/受理时间）"""
         raw = (raw_value or "").strip()
         if not raw:
             return _date_now()
@@ -2739,14 +2777,23 @@ class MainWindow(QWidget, Ui_Form):
             return f"{raw[0:4]}年{raw[4:6]}月{raw[6:8]}日"
         return raw
 
+    def _normalize_compact_time(self, raw_value: str) -> str:
+        """受伤/就诊时间归一为 年月日时分 纯数字 YYYYMMDDHHMM；留空返回 ''（不默认当前）"""
+        raw = (raw_value or "").strip()
+        if not raw:
+            return ""
+        return "".join(ch for ch in raw if ch.isdigit())
+
     def _save_date_inputs(self):
-        """把申请时间/受理时间/就诊时间保存到数据模型（空值用系统当前时间）"""
+        """保存 申请/受理/受伤/就诊 时间到数据模型（申请/受理留空用当前；受伤/就诊留空不填）"""
         if not hasattr(self, 'apply_time_edit') or not hasattr(self, 'accept_time_edit'):
             return
         self.set_data('申请时间', self._resolve_date_input(self.apply_time_edit.text()), 'case')
         self.set_data('受理时间', self._resolve_date_input(self.accept_time_edit.text()), 'case')
+        if hasattr(self, 'injury_time_edit'):
+            self.set_data('受伤时间', self._normalize_compact_time(self.injury_time_edit.text()), 'case')
         if hasattr(self, 'visit_time_edit'):
-            self.set_data('就诊时间', self._resolve_date_input(self.visit_time_edit.text()), 'case')
+            self.set_data('就诊时间', self._normalize_compact_time(self.visit_time_edit.text()), 'case')
 
     def _load_saved_user_config(self):
         """加载已保存的用户配置到UI"""
