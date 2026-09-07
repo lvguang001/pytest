@@ -26,6 +26,10 @@ from case_classifier import CaseClassifier
 from config_service import ConfigService
 from path_utils import path_utils
 from main import UserManager, PasswordLineEdit
+from service_flow import (derive, initial_sf, confirm_delivery, revert_to_ask,
+                          delivered_again, finish_flow, DOC_LABEL, today_iso)
+from todo_board import (TodoBoard, DeliveryConfirmDialog, PostalTrackingDialog,
+                        DecisionConfirmDialog)
 
 # 设置日志级别
 logging.getLogger('config_service').setLevel(logging.WARNING)
@@ -79,7 +83,12 @@ def _witness_label(n: int) -> str:
 
 # 一份"人记录"的规范英文键。case_obj 顶层的 本人 即 role=本人 的记录；
 # 证人 / 法人 数组元素 = 同样这些字段 + role(+ 可选 seq / materials)。
-PERSON_BASE_FIELDS = ("name", "gender", "age", "id_card", "address", "phone", "position")
+PERSON_BASE_FIELDS = ("name", "gender", "age", "id_card", "address", "phone", "position", "identity")
+
+# 案件级：用人单位性质（企业 / 机关（公务员） / 事业单位），默认企业
+UNIT_TYPES = ["企业", "机关（公务员）", "事业单位"]
+DEFAULT_UNIT_TYPE = "企业"
+DEFAULT_IDENTITY = "职工"
 
 # canonical 英文键 → 中文后缀（用于拼 本人姓名/证人姓名/… 兼容扁平键）
 PERSON_CN_SUFFIX = {
@@ -89,6 +98,7 @@ PERSON_CN_SUFFIX = {
     "id_card": "身份证号",
     "address": "身份证地址",
     "phone": "手机号",
+    "identity": "身份",
 }
 # position 语义随角色：扁平兼容键 本人岗位/证人岗位/法人职务
 _FLAT_POSITION_SUFFIX = {"本人": "岗位", "证人": "岗位", "法人": "职务", "家属": "与死者关系"}
@@ -221,6 +231,43 @@ def _regulation_short_to_full(short: str) -> str:
         if art and item:
             return f"《工伤保险条例》第{_int_to_cn_num(art)}条第一款第{_int_to_cn_num(item)}项"
     return short
+
+
+def _unit_is_non_enterprise(unit_type: str) -> bool:
+    """单位性质是否为 机关（公务员）/事业单位（非企业）。"""
+    return (unit_type or "").strip() not in ("", DEFAULT_UNIT_TYPE)
+
+
+def _regulation_full_for_unit(unit_type: str, short: str) -> str:
+    """审批表“引用条例”表述：机关/事业单位案件在《工伤保险条例》前加“参照”。"""
+    full = _regulation_short_to_full(short or "")
+    if not full:
+        return full
+    return ("参照" + full) if _unit_is_non_enterprise(unit_type) else full
+
+
+def _person_affiliation(case_obj: dict) -> str:
+    """受伤职工“所属表述”：企业→「{单位}职工」；机关（公务员）/事业单位→按身份表述。"""
+    ut = str(case_obj.get('unit_type', DEFAULT_UNIT_TYPE) or DEFAULT_UNIT_TYPE)
+    unit = str(case_obj.get('labor_unit', '') or '')
+    ident = str(case_obj.get('identity', '') or '').strip() or DEFAULT_IDENTITY
+    if ut == "机关（公务员）":
+        return f"{unit}（机关）{ident}" if unit else f"机关（公务员）{ident}"
+    if ut == "事业单位":
+        return f"{unit}（事业单位）{ident}" if unit else f"事业单位{ident}"
+    return f"{unit}职工" if unit else "用人单位职工"
+
+
+def _notice_basis_sentence(case_obj: dict, deny: bool = False) -> str:
+    """工伤认定告知书的结论依据句（数据驱动；机关/事业单位加“参照”）。"""
+    full = _regulation_full_for_unit(
+        str(case_obj.get('unit_type', '') or ''),
+        str(case_obj.get('proposed_article', '') or ''))
+    if not full:
+        return ""
+    if deny:
+        return f"不符合{full}认定工伤之规定，拟不予认定为工伤。"
+    return f"符合{full}认定工伤之规定，现拟决定认定为工伤。"
 
 
 def _filter_provided(materials):
@@ -358,7 +405,47 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'construction_plant': 'ZZ新城项目一期工地',
   'statement_edit': '刘大于2026年7月20日在工地受伤后自行申请认定工伤，我作为工友可佐证其考勤与受伤经过。',
   'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
-                {'name': '劳动合同', 'provided': False, 'notes': ''}]}]
+                {'name': '劳动合同', 'provided': False, 'notes': ''}]},
+ {'name': '机关公务员×工伤 本人(孙某)',
+  'role': '本人',
+  'deathCaseCheckbox': False,
+  'personalApplicationCheckbox': False,
+  'unit_type': '机关（公务员）',
+  'identity': '公务员',
+  'name_pane': '孙某',
+  'idnumer_pane': '330301198812126666',
+  'textEdit': '浙江省温州市鹿城区XX路1号',
+  'lineEdit_4': '13811112222',
+  'lineEdit_5': '行政审批窗口岗位',
+  'injured_worker': '孙某',
+  'comboBox': 0,
+  'company_pane': '温州市XX局',
+  'construction_company': '',
+  'construction_plant': '',
+  'statement_edit': '本机关（公务员）工作人员孙某，男，1988年12月12日出生，身份证号330301198812126666。2026年8月18日在办公场所处理公务途中下楼时踩空致右踝扭伤，属工作时间工作场所因工作原因受伤，单位（本机关）申请认定工伤。',
+  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                {'name': '医院诊断证明书', 'provided': True, 'notes': '右踝扭伤'},
+                {'name': '公务员录用/在编证明', 'provided': True, 'notes': ''}]},
+ {'name': '事业单位×工伤 本人(周某)',
+  'role': '本人',
+  'deathCaseCheckbox': False,
+  'personalApplicationCheckbox': False,
+  'unit_type': '事业单位',
+  'identity': '事业编制工作人员',
+  'name_pane': '周某',
+  'idnumer_pane': '330301198901018888',
+  'textEdit': '浙江省温州市龙湾区YY路9号',
+  'lineEdit_4': '13822223333',
+  'lineEdit_5': '专技岗位',
+  'injured_worker': '周某',
+  'comboBox': 0,
+  'company_pane': '温州市XX检验检测中心',
+  'construction_company': '',
+  'construction_plant': '',
+  'statement_edit': '本单位（事业单位）工作人员周某，女，1989年1月1日出生，身份证号330301198901018888。2026年8月20日在实验室内搬运检测设备时被坠落的机箱砸伤左肩，属工作时间工作场所因工作原因受伤，单位申请认定工伤。',
+  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                {'name': '医院诊断证明书', 'provided': True, 'notes': '左肩软组织挫伤'},
+                {'name': '在编证明', 'provided': True, 'notes': ''}]}]
 
 
 # ============================================================================
@@ -971,6 +1058,10 @@ class MainWindow(QWidget, Ui_Form):
         else:
             print(f"❌ 模板路径不存在: {self.TEMPLATE_PATH}")
 
+        self._setup_unit_identity_ui()  # 单位性质下拉 + 共享“身份”输入行（含其下控件下移）
+
+        self._install_todo_kanban()  # 待办事项看板（顶栏之下，含 60s 自动刷新）
+
         print("=" * 50)
         print("🎉 MainWindow 初始化完成")
         print("=" * 50)
@@ -1067,6 +1158,12 @@ class MainWindow(QWidget, Ui_Form):
 
         # ── 保存到 cases_data.json ──
         cases = self._load_cases_data()
+        old = cases.get(case_id)
+        if old:
+            # 整体覆盖前保留既有扩展字段（service_flow/folder_name/transcript_file/
+            # analysis_result/conclusion 等），避免重复核对保存时丢失
+            for k, v in old.items():
+                case_obj.setdefault(k, v)
         cases[case_id] = case_obj
         self._save_cases_data(cases)
 
@@ -1096,6 +1193,11 @@ class MainWindow(QWidget, Ui_Form):
             'phone': self.get_data('本人手机号', '') or self.lineEdit_4.text().strip(),
             'address': self.get_data('本人身份证地址', '') or self.textEdit.toPlainText().strip(),
             'position': self.get_data('本人岗位', '') or self.lineEdit_5.text().strip(),
+            'identity': (self.get_data('本人身份', '')
+                         or (self.identity_edit.text().strip() if hasattr(self, 'identity_edit') else '')
+                         or DEFAULT_IDENTITY),
+            'unit_type': (self.unit_type_combo.currentText().strip() if hasattr(self, 'unit_type_combo')
+                          else '') or DEFAULT_UNIT_TYPE,
             'employer': self.get_data('用工单位', '') or self.construction_company.currentText().strip(),
             'labor_unit': self.get_data('用人单位', '') or self.company_pane.currentText().strip(),
             'site': self.get_data('工地名称', '') or self.construction_plant.currentText().strip(),
@@ -1159,6 +1261,12 @@ class MainWindow(QWidget, Ui_Form):
         self.personal_application_checkbox.setChecked(case_obj.get('applicant_type', '') == '个人申请')
         self.on_case_type_changed()
 
+        # 单位性质（案件级）
+        if hasattr(self, 'unit_type_combo'):
+            ut = str(case_obj.get('unit_type', DEFAULT_UNIT_TYPE)) or DEFAULT_UNIT_TYPE
+            self._set_combo_or_type(self.unit_type_combo, ut)
+            self.set_data('单位性质', ut, 'case')
+
         self._apply_regulation(case_obj.get('proposed_article', ''))
 
         if hasattr(self, 'apply_time_edit'):
@@ -1184,6 +1292,9 @@ class MainWindow(QWidget, Ui_Form):
         self.set_data('本人手机号', case_obj.get('phone', ''), 'basic')
         self.lineEdit_5.setText(str(case_obj.get('position', '')))
         self.set_data('本人岗位', case_obj.get('position', ''), 'basic')
+        if hasattr(self, 'identity_edit'):
+            self.identity_edit.setText(str(case_obj.get('identity', DEFAULT_IDENTITY)) or DEFAULT_IDENTITY)
+        self.set_data('本人身份', str(case_obj.get('identity', DEFAULT_IDENTITY)) or DEFAULT_IDENTITY, 'basic')
         self.textEdit.setPlainText(str(case_obj.get('address', '')))
         self.set_data('本人身份证地址', case_obj.get('address', ''), 'basic')
 
@@ -1291,6 +1402,8 @@ class MainWindow(QWidget, Ui_Form):
                     "name": person_name,
                     "case_nature": '工亡案件' if self.death_case_checkbox.isChecked() else '工伤案件',
                     "applicant_type": '个人申请' if is_personal else '单位申请',
+                    "unit_type": (self.unit_type_combo.currentText().strip()
+                                  if hasattr(self, 'unit_type_combo') else '') or DEFAULT_UNIT_TYPE,
                     # 个人×工亡的申请人语义占位为职工(近亲属语义待工亡阶段细化)
                     "applicant_name": person_name if is_personal else self.get_data('用人单位', ''),
                     "folder_name": os.path.basename(folder_path) if folder_path else '',
@@ -1304,6 +1417,262 @@ class MainWindow(QWidget, Ui_Form):
         except Exception as e:
             print(f"⚠️ 更新工亡案件数据失败: {e}")
             return False
+
+    # ========================================================================
+    # 单位性质 / 人员身份（支持 机关公务员、事业单位 人员工伤）
+    # ========================================================================
+
+    def _setup_unit_identity_ui(self):
+        """新增两个录入位：案件级“单位性质”下拉 + 共享人字段“身份”输入行。
+        身份行插在“岗位”行之下，故把其下（y>=419）左栏控件整体下移 22px。"""
+        # —— 1. 案件级：单位性质下拉（顶栏带右半空位，位于“个人案件”复选框右侧）——
+        self.unit_type_label = QLabel("单位性质：", self)
+        self.unit_type_label.setGeometry(300, 118, 64, 16)
+        self.unit_type_combo = QComboBox(self)
+        self.unit_type_combo.setGeometry(364, 114, 100, 24)
+        self.unit_type_combo.addItems(UNIT_TYPES)
+        self.unit_type_combo.setCurrentText(DEFAULT_UNIT_TYPE)
+        self.unit_type_combo.setEditable(True)
+        self.unit_type_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.unit_type_combo.setToolTip("案件用人单位性质：企业 / 机关（公务员） / 事业单位")
+
+        # —— 2. 共享人字段：身份输入行（标签随角色；置于“岗位”行下方）——
+        self.identity_label = QLabel("本人身份：", self)
+        self.identity_label.setGeometry(250, 404, 78, 16)
+        self.identity_edit = QLineEdit(self)
+        self.identity_edit.setGeometry(328, 401, 113, 20)
+        self.identity_edit.setPlaceholderText(DEFAULT_IDENTITY)
+        self.identity_edit.setToolTip("该谈话人身份：职工 / 公务员 / 事业编制工作人员 等")
+
+        # —— 3. 把身份行之下的左栏控件整体下移 22px（仅左栏 x<478；右面板与顶栏不受影响）——
+        try:
+            for child in self.children():
+                if isinstance(child, QWidget) and child is not self:
+                    try:
+                        g = child.geometry()
+                        if g.x() < 478 and g.y() >= 419:
+                            child.setGeometry(g.x(), g.y() + 22,
+                                              g.width(), g.height())
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # ========================================================================
+    # 待办事项看板：文书送达流程（个人申请工伤案）
+    # ========================================================================
+
+    def _install_todo_kanban(self):
+        """在顶栏(28px)右侧放一个「待办事项(N)」菜单按钮，点击才展开下拉看板；
+        收起时不占用主界面空间；60s 定时按“今天”重算各案件节点/剩余天数。"""
+        win_w = self.width() or 870
+        # 顶栏右侧菜单按钮
+        self.todo_btn = QPushButton("待办事项(0)", self)
+        bw, bh = 128, 24
+        self.todo_btn.setGeometry(win_w - bw - 6, 2, bw, bh)
+        self.todo_btn.setStyleSheet(
+            "QPushButton{background:#eef6ee;border:1px solid #27ae60;border-radius:4px;"
+            "color:#1d6b1d;font-weight:bold;}"
+            "QPushButton:hover{background:#27ae60;color:#fff;}"
+        )
+        self.todo_btn.setCursor(Qt.PointingHandCursor)
+        self.todo_btn.setToolTip("展开/收起文书送达待办事项")
+        self.todo_btn.clicked.connect(self._toggle_todo_panel)
+        # 下拉看板（默认收起）
+        self.todo_board = TodoBoard(self)
+        self.todo_board.setGeometry(6, 32, win_w - 12, 240)
+        self.todo_board.taskClicked.connect(self._on_board_task_click)
+        self.todo_board.hide()
+        self._todo_open = False
+        # 定时刷新（任务文字/倒计时/到期流转）—— 每小时一次
+        self._todo_timer = QTimer(self)
+        self._todo_timer.setInterval(60 * 60 * 1000)
+        self._todo_timer.timeout.connect(self._refresh_todo_board)
+        self._todo_timer.start()
+        self._refresh_todo_board()
+
+    def _toggle_todo_panel(self):
+        """待办事项菜单按钮：展开/收起下拉看板。"""
+        self._todo_open = not self._todo_open
+        self._refresh_todo_board()  # 展开前确保任务/计数最新
+        self.todo_board.setVisible(self._todo_open)
+        if self._todo_open:
+            self.todo_board.raise_()
+
+    def _collect_todo_rows(self):
+        """遍历全部案件，返回「个人申请 + 已建卡 + 未结束」案件的 (case_id, derive结果)。"""
+        try:
+            cases = self._load_cases_data()
+        except Exception:
+            cases = {}
+        today = today_iso()
+        rows = []
+        for cid, cobj in cases.items():
+            try:
+                if str(cobj.get('applicant_type', '')) != '个人申请':
+                    continue
+                sf = cobj.get('service_flow')
+                if not sf or sf.get('done'):
+                    continue
+                d = derive(sf, today)
+                if d.get('phase') in ('none', 'done'):
+                    continue
+                rows.append((cid, d))
+            except Exception:
+                continue
+        return rows
+
+    def _refresh_todo_board(self):
+        """刷新下拉看板内容与顶栏按钮上的任务计数。"""
+        if not getattr(self, 'todo_board', None) or not getattr(self, 'todo_btn', None):
+            return
+        rows = self._collect_todo_rows()
+        self.todo_board.set_tasks(rows)
+        self.todo_btn.setText(f"待办事项({len(rows)})")
+
+    def _ensure_service_flow_started(self, case_id: str, case_obj: dict = None, role: str = ""):
+        """个人申请案：录入第一份谈话笔录成功后自动建卡（幂等；老案件不补建）。
+        建卡口径：目录中「谈话笔录」docx 份数 <=1（即功能上线后首次产生笔录）。"""
+        try:
+            cases = self._load_cases_data()
+        except Exception:
+            return
+        stored = cases.get(case_id)
+        if not stored:
+            if not case_obj:
+                return
+            stored = case_obj
+        if str(stored.get('applicant_type', '')) != '个人申请':
+            return
+        if stored.get('service_flow'):
+            return
+        # 老案件（此前已有笔录）不补建
+        try:
+            folder = os.path.join(self.BASE_PATH, case_id)
+            cnt = 0
+            if os.path.isdir(folder):
+                cnt = sum(1 for f in os.listdir(folder)
+                          if f.lower().endswith('.docx') and '谈话笔录' in f)
+            if cnt > 1:
+                return
+        except Exception:
+            pass
+        stored['service_flow'] = initial_sf(case_id, role=role)
+        cases[case_id] = stored
+        try:
+            self._save_cases_data(cases)
+        except Exception:
+            return
+        self._set_status(f'已建立文书送达待办：{case_id}', 'green')
+        self._refresh_todo_board()
+
+    def _persist_service_flow(self, case_id: str, nsf: dict) -> bool:
+        """把新的 service_flow 写回案件 JSON 并刷新看板。"""
+        try:
+            cases = self._load_cases_data()
+            if case_id not in cases:
+                return False
+            cases[case_id]['service_flow'] = nsf
+            ok = self._save_cases_data(cases)
+            self._refresh_todo_board()
+            return ok
+        except Exception:
+            return False
+
+    def _on_board_task_click(self, case_id: str):
+        """看板任务点击：先收起下拉，再重新读盘并按当前节点派生 → 打开对应弹窗。"""
+        if getattr(self, 'todo_board', None):
+            self.todo_board.hide()
+            self._todo_open = False
+        try:
+            cases = self._load_cases_data()
+        except Exception:
+            return
+        cobj = cases.get(case_id)
+        if not cobj or not cobj.get('service_flow'):
+            return
+        sf = cobj['service_flow']
+        d = derive(sf, today_iso())
+        action = d.get('action')
+        if action == 'delivery_confirm':
+            self._open_delivery_confirm(case_id, d.get('doc'),
+                                        prefill=bool(d.get('prefill', False)))
+        elif action == 'postal_tracking':
+            self._open_postal_tracking(case_id, d.get('doc'))
+        elif action == 'decision':
+            self._on_decision_make(case_id)
+        else:
+            self._refresh_todo_board()
+
+    def _open_delivery_confirm(self, case_id: str, doc: str, prefill: bool = False):
+        """送达确认窗（举证/告知书复用）。保存 → confirm_delivery 落盘重算。"""
+        try:
+            cobj = self._load_cases_data().get(case_id)
+        except Exception:
+            return
+        sf = cobj.get('service_flow') if cobj else None
+        if not sf:
+            return
+        st = sf.get('stage', {})
+        dlg = DeliveryConfirmDialog(
+            case_id, doc, self,
+            prefill_method=(st.get('method') if prefill else None),
+            prefill_deliver=(st.get('deliver_time') if prefill else ''),
+            prefill_send=(st.get('send_time') if prefill else ''))
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        nsf = confirm_delivery(sf, doc, dlg.get_method(),
+                               dlg.get_deliver_time(), dlg.get_send_time())
+        self._persist_service_flow(case_id, nsf)
+        self._set_status(f'已记录{DOC_LABEL.get(doc, doc)}送达确认', 'green')
+
+    def _open_postal_tracking(self, case_id: str, doc: str):
+        """邮寄送达状态追踪。①② → 退回送达确认第一步并重开窗；③ → 更新送达时间。"""
+        try:
+            cobj = self._load_cases_data().get(case_id)
+        except Exception:
+            return
+        sf = cobj.get('service_flow') if cobj else None
+        if not sf:
+            return
+        dlg = PostalTrackingDialog(case_id, doc, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        act = dlg.get_action()
+        if act in ('resend', 'switch'):
+            nsf = revert_to_ask(sf, act, note=dlg.get_note())
+            self._persist_service_flow(case_id, nsf)
+            # 退回「送达确认」第一步：立即重开窗（再次寄送保留方式，改用其它方式则清空）
+            self._open_delivery_confirm(case_id, doc, prefill=(act == 'resend'))
+        elif act == 'delivered':
+            nsf = delivered_again(sf, dlg.get_new_deliver_time(), note=dlg.get_note())
+            self._persist_service_flow(case_id, nsf)
+            self._set_status('已确认送达，倒计时按新的送达时间重算', 'green')
+        else:
+            self._refresh_todo_board()
+
+    def _on_decision_make(self, case_id: str):
+        """制作工伤认定决定书确认。是 → 结束流程(移除待办)并触发“案件审批表”(approve)。"""
+        try:
+            cobj = self._load_cases_data().get(case_id)
+        except Exception:
+            return
+        sf = cobj.get('service_flow') if cobj else None
+        if not sf:
+            return
+        dlg = DecisionConfirmDialog(case_id, self)
+        if dlg.exec_() != QDialog.Accepted or not dlg.get_choice():
+            return  # 否：关闭，保持该待办等待下次处理
+        # 是：视为已触发制作动作 → 流程结束，删除本案件提醒
+        self._persist_service_flow(case_id, finish_flow(sf))
+        self._set_status(f'{case_id} 文书送达流程结束，触发制作工伤认定决定书(案件审批表)', 'green')
+        # 装载该案到主界面，使 approve() 读到正确案本号/日期
+        try:
+            self._apply_case_object(cobj)
+        except Exception as e:
+            print(f"⚠️ 决定书装载案件到主界面失败: {e}")
+        self.lineEdit_2.setText(case_id)
+        QTimer.singleShot(0, self.approve)  # 等同点击“案件审批表”按钮
 
     def _build_unified_template_data(self, case_obj: Dict[str, Any]) -> Dict[str, Any]:
         """构建统一的模板渲染字典。
@@ -1335,6 +1704,9 @@ class MainWindow(QWidget, Ui_Form):
             '本人手机号': case_obj.get('phone', ''),
             '本人身份证地址': case_obj.get('address', ''),
             '本人岗位': case_obj.get('position', ''),
+            '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+            '单位名称': case_obj.get('labor_unit', ''),
+            '本人身份': case_obj.get('identity', DEFAULT_IDENTITY),
             '受伤经过': case_obj.get('injury_description', ''),
             '已提供材料': '、'.join(material_names) if material_names else '',
             '记录人': case_obj.get('recorder', '') or self._get_current_username(),
@@ -1384,6 +1756,7 @@ class MainWindow(QWidget, Ui_Form):
             "applicant_name": data.get('name', '') if data.get('applicant_type', '') == '个人申请' else data.get('labor_unit', ''),
             "case_nature": data.get('case_nature', ''),
             "applicant_type": data.get('applicant_type', ''),
+            "unit_type": data.get('unit_type', DEFAULT_UNIT_TYPE),
             "employer": data.get('employer', ''),
             "labor_unit": data.get('labor_unit', ''),
             "site": data.get('site', ''),
@@ -1401,6 +1774,7 @@ class MainWindow(QWidget, Ui_Form):
             "phone": data.get('phone', ''),
             "address": data.get('address', ''),
             "position": data.get('position', ''),
+            "identity": data.get('identity', DEFAULT_IDENTITY),
             "injury_description": data.get('injury_desc', ''),
             "materials": _filter_provided(materials),
             # ── 记录人 / 证人 ──
@@ -1462,6 +1836,16 @@ class MainWindow(QWidget, Ui_Form):
         self.transcript_worker.error.connect(self._on_transcript_error)
         self.transcript_worker.start()
 
+    def _identity_wording_hint(self, unit_type: str, identity: str, role: str) -> str:
+        """按单位性质/身份给 AI 一句话措辞提示；企业案返回空（沿用“职工/公司”口径）。"""
+        ut = (unit_type or DEFAULT_UNIT_TYPE).strip()
+        ident = (identity or "").strip() or DEFAULT_IDENTITY
+        if ut in ("企业", ""):
+            return ""
+        return (f"本案单位性质为【{ut}】。{role}的身份是【{ident}】。"
+                f"请把受伤职工/被询问人称谓写成“{ut}工作人员/公务员”，"
+                f"避免“公司职工、在公司上班、考勤打卡、车间班组”等企业话术。")
+
     def _prompt_fill_data(self, role: str, case_obj: dict) -> Dict[str, Any]:
         """返回用于填充该角色「发给AI」提示词的数据（case_obj + 当前人记录/法人flat 兼容键）"""
         if role == '证人':
@@ -1482,6 +1866,11 @@ class MainWindow(QWidget, Ui_Form):
                 '证人姓名': w.get('name', '') or self.get_data('证人姓名', ''),
                 '证人身份证号': w.get('id_card', '') or self.get_data('证人身份证号', ''),
                 '证人岗位': w.get('position', '') or self.get_data('证人岗位', ''),
+                '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+                '证人身份': w.get('identity') or self.get_data('证人身份', '') or DEFAULT_IDENTITY,
+                '身份话术': self._identity_wording_hint(
+                    case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+                    w.get('identity') or self.get_data('证人身份', '') or DEFAULT_IDENTITY, '证人'),
             }
         if role == '法人':
             return {
@@ -1498,6 +1887,11 @@ class MainWindow(QWidget, Ui_Form):
                 '法人姓名': self.get_data('法人姓名', ''),
                 '法人职务': self.get_data('法人职务', ''),
                 '法人身份证号': self.get_data('法人身份证号', ''),
+                '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+                '法人身份': self.get_data('法人身份', '') or DEFAULT_IDENTITY,
+                '身份话术': self._identity_wording_hint(
+                    case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+                    self.get_data('法人身份', '') or DEFAULT_IDENTITY, '法人'),
             }
         if role == '家属':
             return {
@@ -1514,9 +1908,18 @@ class MainWindow(QWidget, Ui_Form):
                 '家属姓名': self.get_data('家属姓名', ''),
                 '家属身份证号': self.get_data('家属身份证号', ''),
                 '与死者关系': self.get_data('家属与死者关系', ''),
+                '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+                '家属身份': self.get_data('家属身份', '') or DEFAULT_IDENTITY,
+                '身份话术': self._identity_wording_hint(
+                    case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+                    self.get_data('家属身份', '') or DEFAULT_IDENTITY, '家属'),
             }
-        # 本人：复用统一模板数据（中文+英文 key 富余项替换无害）
-        return self._build_unified_template_data(case_obj)
+        # 本人：复用统一模板数据（中文+英文 key 富余项替换无害），并附身份话术
+        base = self._build_unified_template_data(case_obj)
+        base['身份话术'] = self._identity_wording_hint(
+            case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+            case_obj.get('identity', DEFAULT_IDENTITY), '本人')
+        return base
 
     def _time_check_instruction(self, case_obj: dict) -> str:
         """生成笔录时的时间核对要求：
@@ -1583,6 +1986,8 @@ class MainWindow(QWidget, Ui_Form):
             return
         if role == '证人':
             self._save_witnesses()  # 持久化证人数据
+        # 个人申请案：录入第一份谈话笔录后自动建立“文书送达”待办（看板）
+        self._ensure_service_flow_started(case_id, case_obj, role)
         success, message = self.file_service.open_document(path)
         if success:
             self._set_status(f'已生成并打开{role}谈话笔录', 'green')
@@ -1697,6 +2102,9 @@ class MainWindow(QWidget, Ui_Form):
             '证人身份证地址': w.get('address', '') or self.get_data('证人身份证地址', ''),
             '证人手机号': w.get('phone', '') or self.get_data('证人手机号', ''),
             '证人岗位': w.get('position', '') or self.get_data('证人岗位', ''),
+            '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+            '单位名称': case_obj.get('labor_unit', ''),
+            '证人身份': w.get('identity') or self.get_data('证人身份', '') or DEFAULT_IDENTITY,
             '公司名称': case_obj.get('labor_unit', ''),  # 用人单位（签合同的单位）
         }
 
@@ -1730,6 +2138,9 @@ class MainWindow(QWidget, Ui_Form):
             '法人身份证地址': self.get_data('法人身份证地址', ''),
             '法人手机号': self.get_data('法人手机号', ''),
             '法人职务': self.get_data('法人职务', ''),
+            '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+            '单位名称': case_obj.get('labor_unit', ''),
+            '法人身份': self.get_data('法人身份', '') or DEFAULT_IDENTITY,
             '公司名称': case_obj.get('labor_unit', ''),  # 用人单位（签合同的单位）
         }
 
@@ -1746,6 +2157,9 @@ class MainWindow(QWidget, Ui_Form):
             '家属身份证地址': self.get_data('家属身份证地址', ''),
             '家属手机号': self.get_data('家属手机号', ''),
             '与死者关系': self.get_data('家属与死者关系', ''),
+            '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+            '单位名称': case_obj.get('labor_unit', ''),
+            '家属身份': self.get_data('家属身份', '') or DEFAULT_IDENTITY,
             '公司名称': case_obj.get('labor_unit', ''),  # 用人单位（签合同的单位）
         }
 
@@ -1905,6 +2319,12 @@ class MainWindow(QWidget, Ui_Form):
         self._set_combo_or_type(self.construction_company, data["construction_company"])
         self._set_combo_or_type(self.construction_plant, data["construction_plant"])
 
+        # ── 单位性质 / 人员身份（机关公务员/事业单位支持）──
+        if hasattr(self, 'unit_type_combo'):
+            self._set_combo_or_type(self.unit_type_combo, data.get('unit_type', DEFAULT_UNIT_TYPE))
+        if hasattr(self, 'identity_edit'):
+            self.identity_edit.setText(data.get('identity', DEFAULT_IDENTITY))
+
         # ── 自动计算年龄和性别 ──
         self.on_id_input_finished()
 
@@ -1970,6 +2390,9 @@ class MainWindow(QWidget, Ui_Form):
     def on_role_changed(self):
         """当角色切换时调用"""
         print(f"🔄 角色切换: {self.get_current_role_type()}")
+        # 共享“身份”输入行的标签随角色变化
+        if hasattr(self, 'identity_label'):
+            self.identity_label.setText(f"{self.get_current_role_type()}身份：")
 
     def _setup_paths(self):
         """统一使用PathUtils设置所有路径"""
@@ -2621,42 +3044,53 @@ class MainWindow(QWidget, Ui_Form):
         self.top_status_label.setStyleSheet("color: #888; background: transparent; border: none;")
 
         # ============================================================
-        # 4. 可折叠的用户配置面板（默认隐藏）
+        # 4. 用户配置下拉面板（风格同待办看板下拉；输入自动保存）
         # ============================================================
-        self.api_group = QGroupBox("用户配置", self)
-        self.api_group.setGeometry(5, TOP_BAR_H + 2, 460, 84)
-        self.api_group.setFont(QFont("微软雅黑", 9))
+        self.api_group = QFrame(self)
+        self.api_group.setObjectName("apiPanel")
+        self.api_group.setAttribute(Qt.WA_StyledBackground, True)  # 确保不透明背景生效
+        self.api_group.setStyleSheet(
+            "QFrame#apiPanel{background:#ffffff;border:1px solid #b8d0b8;border-radius:4px;}"
+        )
+        # 与待办看板一致：横跨整个主界面宽度，浮于其余控件之上
+        self.api_group.setGeometry(6, TOP_BAR_H + 2,
+                                   (self.width() or 870) - 12, 150)
         self.api_group.hide()  # 默认隐藏
 
-        # 第一行：用户名 + API密钥
-        lbl_user = QLabel("用户:", self.api_group)
-        lbl_user.setGeometry(10, 22, 35, 20)
+        panel_v = QVBoxLayout(self.api_group)
+        panel_v.setContentsMargins(12, 10, 12, 10)
+        panel_v.setSpacing(6)
 
+        head = QLabel("用户配置（修改后自动保存）", self.api_group)
+        head.setStyleSheet("color:#2c5f2d;font-weight:bold;background:transparent;")
+        panel_v.addWidget(head)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("用户：", self.api_group))
         self.api_user_combo = QComboBox(self.api_group)
         self.api_user_combo.setEditable(True)
-        self.api_user_combo.setGeometry(45, 20, 140, 22)
         self.api_user_combo.setPlaceholderText("输入用户名")
         self.api_user_combo.currentTextChanged.connect(self._on_user_combo_changed)
+        row1.addWidget(self.api_user_combo, 1)
+        panel_v.addLayout(row1)
 
-        lbl_key = QLabel("密钥:", self.api_group)
-        lbl_key.setGeometry(195, 22, 35, 20)
-
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("密钥：", self.api_group))
         self.api_key_input = PasswordLineEdit(self.api_group)
-        self.api_key_input.setGeometry(230, 20, 160, 22)
         self.api_key_input.setPlaceholderText("输入API密钥")
+        row2.addWidget(self.api_key_input, 1)
+        panel_v.addLayout(row2)
 
-        # 第二行：记住我 + 保存 + 状态
-        self.api_remember_cb = QCheckBox("记住我", self.api_group)
-        self.api_remember_cb.setGeometry(10, 50, 70, 20)
-        self.api_remember_cb.setChecked(True)
+        hint = QLabel("输入后自动保存，下次启动自动使用；仅在你修改输入时更新。", self.api_group)
+        hint.setStyleSheet("color:#888;font-size:9pt;background:transparent;")
+        panel_v.addWidget(hint)
 
-        self.api_save_btn = QPushButton("保存配置", self.api_group)
-        self.api_save_btn.setGeometry(80, 48, 70, 23)
-        self.api_save_btn.clicked.connect(self._on_save_api_config)
-
-        self.api_status_label = QLabel("", self.api_group)
-        self.api_status_label.setGeometry(160, 50, 290, 20)
-        self.api_status_label.setStyleSheet("color: #888;")
+        # 编辑完成即自动保存
+        try:
+            self.api_user_combo.lineEdit().editingFinished.connect(self._on_api_edited)
+        except Exception:
+            pass
+        self.api_key_input.editingFinished.connect(self._on_api_edited)
 
         # ============================================================
         # 5. 右侧面板：案件申请陈述（上）
@@ -2828,82 +3262,62 @@ class MainWindow(QWidget, Ui_Form):
     def _toggle_config_panel(self):
         """展开/收起用户配置面板"""
         visible = self.api_group.isVisible()
-        self.api_group.setVisible(not visible)
-        arrow = "▼" if not visible else "⚙"
+        if visible:
+            self.api_group.hide()
+        else:
+            self.api_group.show()
+            self.api_group.raise_()  # 置顶，避免被“案件申请陈述”等面板遮挡
+        arrow = "▼" if visible else "⚙"
         self.config_toggle_btn.setText(arrow)
 
     def _update_api_status(self):
-        """更新API状态标签"""
-        if not hasattr(self, 'api_status_label'):
+        """更新顶栏状态文字（配置面板内不再显示状态/图标）"""
+        if not hasattr(self, 'top_status_label'):
             return
         if self.ai_service:
-            self.api_status_label.setText("✅ AI已就绪")
-            self.api_status_label.setStyleSheet("color: green; font-weight: bold;")
-            self.top_status_label.setText("✅ AI已就绪")
+            self.top_status_label.setText("AI 已就绪")
             self.top_status_label.setStyleSheet("color: green; background: transparent; border: none;")
         else:
             username = self._get_current_username()
             if not username or username == "未登录用户":
-                msg = "⚠️ 请配置用户名和API密钥"
-                self.api_status_label.setText(msg)
-                self.api_status_label.setStyleSheet("color: orange;")
-                self.top_status_label.setText(msg)
-                self.top_status_label.setStyleSheet("color: orange; background: transparent; border: none;")
+                msg = "请配置用户名和API密钥"
             else:
-                msg = "⚠️ API密钥未配置，AI功能不可用"
-                self.api_status_label.setText(msg)
-                self.api_status_label.setStyleSheet("color: orange;")
-                self.top_status_label.setText(msg)
-                self.top_status_label.setStyleSheet("color: orange; background: transparent; border: none;")
+                msg = "API密钥未配置，AI 功能不可用"
+            self.top_status_label.setText(msg)
+            self.top_status_label.setStyleSheet("color: orange; background: transparent; border: none;")
 
-    def _on_save_api_config(self):
-        """保存API配置"""
+    def _on_api_edited(self):
+        """用户/密钥编辑完成后自动保存（无需“保存”按钮）；仅输入改变时才会触发。"""
         username = self.api_user_combo.currentText().strip()
         api_key = self.api_key_input.text().strip()
-        remember = self.api_remember_cb.isChecked()
-
         if not username:
-            QMessageBox.warning(self, "提示", "请输入用户名")
             return
-
-        # 保存到UserManager
-        api_url = "https://api.deepseek.com"
-        success = self.user_manager.save_user_config(
-            username=username,
-            api_url=api_url,
-            api_key=api_key,
-            remember_me=remember,
-            service="DeepSeek"
-        )
-
-        if success:
-            # 更新下拉列表
-            if self.api_user_combo.findText(username) < 0:
-                self.api_user_combo.addItem(username)
-                self.api_user_combo.setCurrentText(username)
-
-            # 更新数据模型
-            self.data_model.output_config['用户名'] = username
-
-            # 重新初始化AI服务
-            self.init_ai_service()
-
-            self._set_status(f"配置已保存 - 用户: {username}", "green")
-            print(f"✅ API配置已保存: 用户={username}, 密钥={'已设置' if api_key else '未设置'}")
-        else:
-            QMessageBox.critical(self, "错误", "保存配置失败，请重试")
+        try:
+            self.user_manager.save_user_config(
+                username=username,
+                api_url="https://api.deepseek.com",
+                api_key=api_key,
+                remember_me=True,   # 默认记住；启动自动使用
+                service="DeepSeek",
+            )
+        except Exception as e:
+            print(f"⚠️ 自动保存失败: {e}")
+            return
+        if self.api_user_combo.findText(username) < 0:
+            self.api_user_combo.addItem(username)
+        self.data_model.output_config['用户名'] = username
+        self.init_ai_service()
+        print(f"✅ API配置已自动保存: 用户={username}, 密钥={'已设置' if api_key else '未设置'}")
 
     def _on_user_combo_changed(self, text):
-        """用户名下拉框变化时自动加载对应的API密钥"""
+        """用户名下拉框变化时自动加载对应的API密钥（不触发保存）"""
         if not text or not text.strip():
             return
         username = text.strip()
         user_data = self.user_manager.users_data.get('users', {}).get(username, {})
         if user_data:
             api_key = user_data.get('api_key', '')
-            remember = user_data.get('remember_me', True)
             self.api_key_input.setText(api_key)
-            self.api_remember_cb.setChecked(remember)
             if api_key:
                 print(f"✅ 已加载用户 '{username}' 的API配置")
             else:
@@ -3335,6 +3749,11 @@ class MainWindow(QWidget, Ui_Form):
             '告知日期': current_date,
             '受理编号': case_obj.get('case_id', ''),
             '案本号': case_obj.get('case_id', ''),
+            '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+            '本人身份': case_obj.get('identity', DEFAULT_IDENTITY),
+            '本人所属表述': _person_affiliation(case_obj),
+            '认定依据句': _notice_basis_sentence(
+                case_obj, deny=('不予' in str(case_obj.get('conclusion', '')))),
         }
 
     def _apply_ui_settings(self):
@@ -3364,6 +3783,8 @@ class MainWindow(QWidget, Ui_Form):
             'address': self.textEdit.toPlainText().strip(),
             'phone': self.lineEdit_4.text().strip(),
             'position': self.lineEdit_5.text().strip(),
+            'identity': (self.identity_edit.text().strip()
+                         if hasattr(self, 'identity_edit') else ''),
         }
 
     def _write_person_to_form(self, person: Dict[str, Any]):
@@ -3379,6 +3800,8 @@ class MainWindow(QWidget, Ui_Form):
         self.textEdit.setPlainText(_txt(person, 'address'))
         self.lineEdit_4.setText(_txt(person, 'phone'))
         self.lineEdit_5.setText(_txt(person, 'position'))
+        if hasattr(self, 'identity_edit'):
+            self.identity_edit.setText(_txt(person, 'identity'))
 
     def _person_to_flat(self, role: str, person: Dict[str, Any]):
         """统一人记录 → 兼容扁平中文键（本人姓名/证人姓名/…，经 set_data 入 basic_info）"""
@@ -3550,6 +3973,7 @@ class MainWindow(QWidget, Ui_Form):
             "seq": _witness_label(new_index + 1),
             "name": "", "gender": "", "age": "",
             "id_card": "", "address": "", "phone": "", "position": "",
+            "identity": "",
         }
         self.data_model.witnesses.append(new_witness)
         self.data_model.current_witness_index = new_index
@@ -3565,6 +3989,7 @@ class MainWindow(QWidget, Ui_Form):
             "seq": _witness_label(new_index + 1),
             "name": "", "gender": "", "age": "",
             "id_card": "", "address": "", "phone": "", "position": "",
+            "identity": "",
         }
         self.data_model.witnesses.append(new_witness)
         self.data_model.current_witness_index = new_index
@@ -3876,11 +4301,11 @@ class MainWindow(QWidget, Ui_Form):
 
     def _detect_base_category(self, key: str) -> str:
         """检测基础键名的类别"""
-        if key in ['姓名', '年龄', '性别', '身份证号', '身份证地址', '手机号', '岗位', '职务']:
+        if key in ['姓名', '年龄', '性别', '身份证号', '身份证地址', '手机号', '岗位', '职务', '身份']:
             return 'basic'
         elif key in ['用工单位', '用人单位', '工地名称']:
             return 'company'
-        elif key in ['案件性质', '申请类型', '案本号', '案件类型']:
+        elif key in ['案件性质', '申请类型', '案本号', '案件类型', '单位性质']:
             return 'case'
         elif key in ['当前日期', '当前时间', '当前时期']:
             return 'output'
@@ -3934,6 +4359,8 @@ class MainWindow(QWidget, Ui_Form):
             self.name_pane, self.age_pane, self.lineEdit,
             self.idnumer_pane, self.textEdit, self.lineEdit_4, self.lineEdit_5
         ]
+        if hasattr(self, 'identity_edit'):
+            fields.append(self.identity_edit)
         for field in fields:
             if isinstance(field, QLineEdit):
                 field.clear()
@@ -3999,7 +4426,9 @@ class MainWindow(QWidget, Ui_Form):
                 'person_name': case_obj.get('name', ''),
                 'company_name': case_obj.get('labor_unit', ''),
                 'applicant_name': case_obj.get('applicant_name', ''),
-                'regulation': _regulation_short_to_full(case_obj.get('proposed_article', '')),
+                'regulation': _regulation_full_for_unit(
+                    case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
+                    case_obj.get('proposed_article', '')),
                 'folder_name': case_obj.get('folder_name', ''),
                 'person_gender': case_obj.get('gender', ''),
                 'id_card': case_obj.get('id_card', ''),
@@ -4146,6 +4575,7 @@ class MainWindow(QWidget, Ui_Form):
                 '本人身份证号': case_data.get('id_card', ''),
                 '受伤经过': injury_process,
                 '医疗结论': medical_conclusion,
+                '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
                 '引用条例': case_data.get('regulation', ''),
                 '申请时间': self._resolve_date_input(self.apply_time_edit.text()),
                 '受理时间': self._resolve_date_input(self.accept_time_edit.text()),
@@ -4429,6 +4859,8 @@ class MainWindow(QWidget, Ui_Form):
                 f.write(f"身份证地址：{self.textEdit.toPlainText().strip()}\n")
                 f.write(f"电话：{self.lineEdit_4.text().strip()}\n")
                 f.write(f"岗位：{self.lineEdit_5.text().strip()}\n")
+                f.write(f"单位性质：{(self.unit_type_combo.currentText().strip() if hasattr(self, 'unit_type_combo') else '') or DEFAULT_UNIT_TYPE}\n")
+                f.write(f"身份：{(self.identity_edit.text().strip() if hasattr(self, 'identity_edit') else '') or DEFAULT_IDENTITY}\n")
                 f.write(f"公司：{company_info.get('用工单位', '')}\n")
                 f.write(f"用人单位：{company_info.get('用人单位', '')}\n")
                 f.write(f"工地名称：{company_info.get('工地名称', '')}\n")

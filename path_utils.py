@@ -55,14 +55,62 @@ class PathUtils:
         self.resource_dir = self.app_root / "resource"
         self.template_dir = self.resource_dir / "模板文件"
 
-        # 4. 用户存储目录（桌面）
-        desktop = Path.home() / "Desktop"
+        # 4. 用户存储目录（取“屏幕上真实显示的桌面”，尊重桌面重定向，如 G:\桌面）
+        desktop = self._get_shell_desktop()
         self.storage_dir = desktop / "工伤助手存储案本"
 
         # 确保所有目录存在
         for dir_path in [self.config_dir, self.resource_dir,
                          self.template_dir, self.storage_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _get_shell_desktop() -> Path:
+        """获取系统“真实桌面”目录（跟随桌面位置重定向）。
+
+        Windows 上很多机器把桌面挪到了其它盘/OneDrive（如 G:\\桌面），此时
+        Path.home()/Desktop 指向的旧目录并不显示在屏幕上。这里用
+        SHGetKnownFolderPath(FOLDERID_Desktop) 取真实路径；失败时退回
+        Path.home()/Desktop。
+        """
+        if os.name == "nt":
+            try:
+                import ctypes
+                import uuid
+                from ctypes import wintypes
+
+                class _GUID(ctypes.Structure):
+                    _fields_ = [("Data1", ctypes.c_ulong),
+                                ("Data2", ctypes.c_ushort),
+                                ("Data3", ctypes.c_ushort),
+                                ("Data4", ctypes.c_ubyte * 8)]
+
+                def _to_guid(s):
+                    u = uuid.UUID(s)
+                    g = _GUID()
+                    g.Data1 = u.time_low
+                    g.Data2 = u.time_mid
+                    g.Data3 = u.time_hi_version
+                    g.Data4 = (ctypes.c_ubyte * 8)(*u.bytes[8:])
+                    return g
+
+                FOLDERID_Desktop = _to_guid("B4BFCC3A-DB2C-424C-B029-7FE99A87C641")
+                func = ctypes.windll.shell32.SHGetKnownFolderPath
+                func.argtypes = [ctypes.POINTER(_GUID), ctypes.c_ulong,
+                                 wintypes.HANDLE, ctypes.POINTER(ctypes.c_wchar_p)]
+                buf = ctypes.c_wchar_p()
+                hr = func(ctypes.byref(FOLDERID_Desktop), 0, None, ctypes.byref(buf))
+                if hr == 0 and buf.value:
+                    path = Path(buf.value)
+                    try:
+                        ctypes.windll.ole32.CoTaskMemFree(buf)
+                    except Exception:
+                        pass
+                    if str(path).strip():
+                        return path
+            except Exception:
+                pass
+        return Path.home() / "Desktop"
 
     # ============ 主要路径获取方法 ============
 

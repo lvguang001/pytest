@@ -12,6 +12,7 @@ venv/
 
 # 备份 / 临时文件
 *.bak
+*.bak.docx
 *.bak2
 *.part
 _backup_*/
