@@ -11,10 +11,27 @@ import json
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-# 修复 Windows 控制台 GBK 编码无法打印 emoji 的问题
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+def _force_utf8_console():
+    """修复 Windows 控制台 GBK 编码无法打印 emoji（🚀✅⚠️）的问题。
+
+    只在编码确实不是 UTF-8 时才包一层。原先无条件替换 sys.stdout/sys.stderr，
+    会在 import 期间夺走宿主（pytest 捕获、IDE 运行窗口等）的流对象引用，
+    导致其底层缓冲被 GC 关闭、后续读取报 "I/O operation on closed file"。
+    """
+    if sys.platform != 'win32':
+        return
+    for name in ('stdout', 'stderr'):
+        stream = getattr(sys, name, None)
+        buf = getattr(stream, 'buffer', None)   # pythonw 无控制台时为 None
+        if buf is None:
+            continue
+        encoding = (getattr(stream, 'encoding', '') or '').lower()
+        if encoding.replace('-', '') == 'utf8':
+            continue                            # 已是 UTF-8，无需包装
+        setattr(sys, name, io.TextIOWrapper(buf, encoding='utf-8', errors='replace'))
+
+
+_force_utf8_console()
 
 from PyQt5.QtWidgets import (
     QApplication, QLineEdit, QToolButton, QMessageBox

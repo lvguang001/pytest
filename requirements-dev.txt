@@ -1,0 +1,6 @@
+# 开发/测试依赖（运行程序本身不需要）
+# 安装：python -m pip install -r requirements-dev.txt
+# 跑测试：python -m pytest
+-r requirements.txt
+
+pytest>=8.0
