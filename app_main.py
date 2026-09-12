@@ -1187,9 +1187,16 @@ class MainWindow(QWidget, Ui_Form):
         self._compact_identity_row()  # 身份并入电话/岗位行，收掉空行
         self._move_time_fields_up()   # 时间字段移到拟用条例下方
         self._compact_doc_buttons()   # 底部三个按钮并成一组
+        self._move_witness_row_up()   # 证人编号行移到单位性质那行并常显
         self._setup_status_boxes()    # 两处提示位的常显方框
         self._relocate_talk_button()  # 谈话笔录按钮移到身份证导入之后
         self._align_role_radios()     # 家属抬到与本人/证人/法人同一行
+        # 必须排在上面几条之后：统一行距是按 y 邻近把控件归成"行"的，
+        # 若行内的控件还没对齐（如 label_15 尚未与 label_14 对齐、家属尚未
+        # 与其它角色齐平），同一行会被拆成两行、越推越散。
+        self._uniform_row_spacing()
+        # 右栏两框加大、底边与左栏最后一行齐平（依赖上一步定下的左栏位置）
+        self._grow_right_panels()
 
         print("=" * 50)
         print("🎉 MainWindow 初始化完成")
@@ -1830,6 +1837,132 @@ class MainWindow(QWidget, Ui_Form):
         x = first.x() + first.width() + gap
         second.move(x, first.y())
         third.move(x + second.width() + gap, first.y())
+
+    def _uniform_row_spacing(self):
+        """把左栏各行按固定行距重排。
+
+        各行间距原先从 3px 到 70px 不等——都是历次插入控件时各自挪出来的，
+        没有统一标准。这里按 y 邻近把控件归成「行」，再让相邻行保持同样的间距。
+
+        只动纵向。行高由各行自己的控件决定（住址那行天生高一些），
+        所以是「间距一致」而非「行距/顶距等分」。
+        """
+        ROW_TOL = 12     # y 相差不超过这个值算同一行（标签与输入框常有几像素错位）
+        GAP = 18         # 目标行距；取现有各行的常见值，只收紧异常的那几处
+
+        items = [c for c in self.children()
+                 if isinstance(c, QWidget) and c is not self
+                 and c.geometry().x() < 478 and c.geometry().y() >= 40]
+        if not items:
+            return
+
+        # 按 y 聚成行
+        items.sort(key=lambda c: c.geometry().y())
+        groups, cur = [], [items[0]]
+        for c in items[1:]:
+            if c.geometry().y() - cur[-1].geometry().y() <= ROW_TOL:
+                cur.append(c)
+            else:
+                groups.append(cur)
+                cur = [c]
+        groups.append(cur)
+
+        # 逐行下推：每行顶部 = 上一行底部 + GAP
+        cursor = min(c.geometry().y() for c in groups[0])
+        for grp in groups:
+            top = min(c.geometry().y() for c in grp)
+            bottom = max(c.geometry().y() + c.geometry().height() for c in grp)
+            delta = cursor - top
+            if delta:
+                for c in grp:
+                    c.move(c.x(), c.y() + delta)
+            cursor += (bottom - top) + GAP
+
+    @staticmethod
+    def _fit_group_content(group):
+        """把分组框内的主体控件撑高、按钮贴底，让框加高后内容也跟着长大。"""
+        kids = [c for c in group.children()
+                if isinstance(c, QWidget) and c.parent() is group]
+        buttons = [c for c in kids if isinstance(c, QPushButton)]
+        bodies = [c for c in kids if not isinstance(c, QPushButton)]
+        if not kids:
+            return
+
+        BOTTOM_PAD, BODY_GAP = 5, 4
+        btn_h = buttons[0].height() if buttons else 0
+        btn_y = group.height() - BOTTOM_PAD - btn_h
+        for b in buttons:
+            b.move(b.x(), btn_y)
+        if bodies:
+            body = bodies[0]
+            body.resize(body.width(), max(40, btn_y - body.y() - BODY_GAP))
+
+    def _grow_right_panels(self):
+        """把右栏两个框上下加大，底边与左栏最下面一行齐平。
+
+        原先两框底下空着 171px——窗口是固定高度，右栏却没占满。
+        多出来的高度两框平分（保持它们原本的大小差）。
+        """
+        g1 = getattr(self, 'statement_group', None)      # 案件申请陈述
+        g2 = getattr(self, 'material_group', None)       # 目前提供的材料分类
+        if g1 is None or g2 is None:
+            return
+
+        # 左栏最下面一行的底边。用 isHidden() 而不是 isVisible()——本方法在
+        # __init__ 里跑，此时窗口还没 show()，isVisible() 对所有子控件都是 False。
+        # isHidden() 只反映是否被显式 hide 过，正好用来排除默认不显示的证人行。
+        left = [c for c in self.children()
+                if isinstance(c, QWidget) and c is not self and not c.isHidden()
+                and c.geometry().x() < 478 and c.geometry().y() >= 40]
+        if not left:
+            return
+        target = max(c.geometry().y() + c.geometry().height() for c in left)
+
+        r1, r2 = g1.geometry(), g2.geometry()
+        gap = r2.y() - (r1.y() + r1.height())
+        extra = target - (r2.y() + r2.height())
+        if extra <= 0:
+            return
+
+        h1 = r1.height() + extra // 2
+        h2 = r2.height() + (extra - extra // 2)
+        g1.resize(r1.width(), h1)
+        g2.move(r2.x(), r1.y() + h1 + gap)
+        g2.resize(r2.width(), h2)
+
+        self._fit_group_content(g1)
+        self._fit_group_content(g2)
+
+    def _move_witness_row_up(self):
+        """把「证人编号 / 添加证人」从左侧栏底部移到「单位性质」那一行，并改为常显。
+
+        原先它们贴在左栏最底部、且只在选中证人角色时才出现；现在并到单位性质
+        右边，任何时候都在——不必先切角色才能切换/新增证人。
+        为腾出位置，单位性质下拉从 360 缩到 100。
+        """
+        combo = getattr(self, 'unit_type_combo', None)     # 单位性质下拉
+        wlab = getattr(self, 'witness_label', None)
+        wcombo = getattr(self, 'witness_combo', None)
+        wbtn = getattr(self, 'add_witness_btn', None)
+        if any(x is None for x in (combo, wlab, wcombo, wbtn)):
+            return
+
+        row_y = combo.y()
+        C_W, LAB_W, WC_W, BTN_W = 100, 60, 110, 68
+        combo.resize(C_W, combo.height())
+
+        x = combo.x() + combo.width() + 8
+        wlab.move(x, row_y + 2)
+        wlab.resize(LAB_W, wlab.height())
+        x += LAB_W + 6
+        wcombo.move(x, row_y)
+        wcombo.resize(WC_W, wcombo.height())
+        x += WC_W + 6
+        wbtn.move(x, row_y)
+        wbtn.resize(BTN_W, wbtn.height())
+
+        for w in (wlab, wcombo, wbtn):
+            w.show()
 
     def _align_role_radios(self):
         """把「家属」抬到与本人/证人/法人同一行，四个角色排成一行。
@@ -4276,12 +4409,12 @@ class MainWindow(QWidget, Ui_Form):
         if role == "本人":
             self.lineEdit_2.clear()
 
-        # 多证人：切换到证人时显示下拉框并加载；切走时保存当前证人并隐藏
+        # 多证人：证人编号行常显（见 _move_witness_row_up），不再随角色隐藏。
+        # 切到证人时加载当前证人；切走时先把表单写回当前证人。
         if role == "证人":
             self._show_witness_ui()
         else:
             self._sync_form_to_current_witness()
-            self._hide_witness_ui()
 
     def _clear_role_data(self, role: str):
         """清除指定角色在数据模型与模板字典中的所有数据，确保多人数据一一对应"""
@@ -4311,10 +4444,7 @@ class MainWindow(QWidget, Ui_Form):
         self.add_witness_btn.setObjectName("add_witness_btn")
         self.add_witness_btn.setGeometry(330, 763, 80, 24)
         self.add_witness_btn.clicked.connect(self._add_witness)
-
-        self.witness_label.hide()
-        self.witness_combo.hide()
-        self.add_witness_btn.hide()
+        # 常显（不再随角色隐藏），位置由 _move_witness_row_up() 摆到单位性质那一行
 
     def _show_witness_ui(self):
         """切换到证人角色时显示下拉框，并加载当前/首位证人"""
@@ -4325,7 +4455,7 @@ class MainWindow(QWidget, Ui_Form):
         if not self.data_model.witnesses:
             if self.witness_combo.count() == 0:
                 self.witness_combo.blockSignals(True)
-                self.witness_combo.addItem("（暂无证人，请添加）")
+                self.witness_combo.addItem("（暂无证人）")
                 self.witness_combo.blockSignals(False)
             return
 
@@ -4334,10 +4464,6 @@ class MainWindow(QWidget, Ui_Form):
         self._refresh_witness_combo()
         self._sync_current_witness_to_form()
 
-    def _hide_witness_ui(self):
-        self.witness_label.hide()
-        self.witness_combo.hide()
-        self.add_witness_btn.hide()
 
     def _current_witness(self) -> Optional[Dict[str, Any]]:
         idx = self.data_model.current_witness_index

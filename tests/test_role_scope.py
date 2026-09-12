@@ -389,7 +389,7 @@ class Test信息提示方框:
 
 class Test主界面布局:
 
-    def test_单位性质在案本号之下且独占一行(self, win):
+    def test_单位性质在案本号之下(self, win):
         num = win.label_10.geometry()             # 「案本号：」
         lab = win.unit_type_label.geometry()      # 「单位性质：」
         combo = win.unit_type_combo.geometry()
@@ -397,9 +397,29 @@ class Test主界面布局:
         assert lab.x() == num.x(), "「单位性质：」应与「案本号：」上下对齐"
         assert lab.y() > num.y(), "应在案本号下方"
         assert combo.x() == win.lineEdit_2.x(), "下拉框左缘应与案本号输入框对齐"
-        assert combo.width() >= 350, "下拉框应拉长占满一行"
         assert combo.y() + combo.height() <= win.radioButton.y(), \
             "不应压住下方的角色单选"
+
+    def test_证人编号行并入单位性质行(self, win):
+        """证人那组原在左栏最底部，现并到单位性质右边；下拉也让位缩窄了"""
+        combo = win.unit_type_combo.geometry()
+        wlab = win.witness_label.geometry()
+        wcombo = win.witness_combo.geometry()
+        wbtn = win.add_witness_btn.geometry()
+
+        assert wcombo.y() == combo.y() and wbtn.y() == combo.y(), \
+            "应与单位性质下拉同排"
+        assert combo.x() + combo.width() < wlab.x() < wcombo.x() < wbtn.x(), \
+            "顺序应为 单位性质 → 证人编号 → 下拉 → 添加证人"
+        assert combo.width() < 360, "单位性质下拉应为证人那组让位而缩窄"
+        assert wbtn.x() + wbtn.width() <= 441, "不应越出表单右缘"
+
+    def test_证人编号行常显(self, as_role):
+        """原先只在证人角色下出现，现应始终可见"""
+        for role in ("本人", "证人", "法人", "家属"):
+            win = as_role(role)
+            for name in ("witness_label", "witness_combo", "add_witness_btn"):
+                assert not getattr(win, name).isHidden(), f"{role} 角色下 {name} 被隐藏了"
 
     def test_插入单位性质行后左栏不越界(self, win):
         from PyQt5.QtWidgets import QWidget
@@ -456,12 +476,15 @@ class Test主界面布局:
         assert win.lbl_apply.geometry().x() == win.label_6.geometry().x(), \
             "左列标签应与「拟用条例：」左对齐"
 
-    def test_时间字段不压住证人行(self, win):
-        """回归：去掉外框前，时间区与证人编号行重叠 24px"""
-        bottom = max(f.geometry().y() + f.geometry().height()
-                     for f in (win.apply_time_edit, win.accept_time_edit,
-                               win.injury_time_edit, win.visit_time_edit))
-        assert win.witness_combo.geometry().y() >= bottom, "证人行被时间字段压住"
+    def test_证人行与时间字段不重叠(self, win):
+        """证人行原先压在时间区上（重叠 24px），上移后应彻底分开"""
+        wg = win.witness_combo.geometry()
+        wtop, wbottom = wg.y(), wg.y() + wg.height()
+        for f in (win.apply_time_edit, win.accept_time_edit,
+                  win.injury_time_edit, win.visit_time_edit):
+            g = f.geometry()
+            assert g.y() + g.height() <= wtop or g.y() >= wbottom, \
+                "证人行与时间字段重叠了"
 
     def test_底部三个按钮并成一组(self, win):
         """原「谈话通知书」前面有 105px 空档，看着像分成了两组"""
@@ -477,6 +500,74 @@ class Test主界面布局:
         gap2 = c.x() - (b.x() + b.width())
         assert gap1 == gap2, f"三个按钮间距应一致，实为 {gap1} / {gap2}"
         assert gap1 < 105, "原先的大空档应已消除"
+
+    def _left_rows(self, win):
+        """按 y 邻近把左栏控件归成「行」（与 _uniform_row_spacing 同一口径）"""
+        from PyQt5.QtWidgets import QWidget
+        items = sorted((c for c in win.children()
+                        if isinstance(c, QWidget) and c is not win
+                        and c.geometry().x() < 478 and c.geometry().y() >= 40),
+                       key=lambda c: c.geometry().y())
+        groups, cur = [], [items[0]]
+        for c in items[1:]:
+            if c.geometry().y() - cur[-1].geometry().y() <= 12:
+                cur.append(c)
+            else:
+                groups.append(cur)
+                cur = [c]
+        groups.append(cur)
+        return [(min(c.geometry().y() for c in g),
+                 max(c.geometry().y() + c.geometry().height() for c in g))
+                for g in groups]
+
+    def test_左栏各行间距统一(self, win):
+        """原间距从 3px 到 70px 不等，现应全部一致"""
+        rows = self._left_rows(win)
+        gaps = [rows[i + 1][0] - rows[i][1] for i in range(len(rows) - 1)]
+        assert len(set(gaps)) == 1, f"行距不统一：{gaps}"
+
+    def test_统一行距后不越界(self, win):
+        """行距失配时内容会被越推越低——这条能兜住那种回归"""
+        bottom = self._left_rows(win)[-1][1]
+        assert bottom <= win.height(), f"左栏内容到 {bottom}，超出窗口高 {win.height()}"
+
+    # ── 右栏两个框 ──
+
+    def _left_bottom(self, win):
+        from PyQt5.QtWidgets import QWidget
+        rows = [c for c in win.children()
+                if isinstance(c, QWidget) and c is not win and not c.isHidden()
+                and c.geometry().x() < 478 and c.geometry().y() >= 40]
+        return max(c.geometry().y() + c.geometry().height() for c in rows)
+
+    def test_右栏两框底边与左栏齐平(self, win):
+        box = win.material_group.geometry()
+        assert box.y() + box.height() == self._left_bottom(win), \
+            "材料分类框的底边应与左栏最后一行齐平"
+
+    def test_右栏两框已加高(self, win):
+        """原先两框下面空着 171px，现在应占满"""
+        assert win.statement_group.height() > 350, "案件申请陈述框未加高"
+        assert win.material_group.height() > 235, "材料分类框未加高"
+
+    def test_右栏框内主体随之撑大(self, win):
+        """框加高后里面的文本区/列表也要长高，否则只是多出空白"""
+        from PyQt5.QtWidgets import QWidget, QPushButton
+        for group, floor in ((win.statement_group, 300), (win.material_group, 185)):
+            kids = [c for c in group.children()
+                    if isinstance(c, QWidget) and c.parent() is group]
+            body = [c for c in kids if not isinstance(c, QPushButton)][0]
+            buttons = [c for c in kids if isinstance(c, QPushButton)]
+
+            assert body.height() > floor, f"{group.title()} 内主体未撑大"
+            assert body.y() + body.height() <= buttons[0].y(), \
+                f"{group.title()} 内主体压住了按钮"
+
+    def test_两框不重叠且留缝(self, win):
+        g1 = win.statement_group.geometry()
+        g2 = win.material_group.geometry()
+        assert g1.y() + g1.height() <= g2.y(), "两框重叠了"
+        assert g2.x() == g1.x() and g2.width() == g1.width(), "两框应左右对齐"
 
     def test_四个角色单选排成一行(self, win):
         """家属原独占第二行且缩进在最左，现应与本人/证人/法人齐平"""
