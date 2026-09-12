@@ -187,15 +187,18 @@ def migrate_case(flat: Dict[str, Any]) -> Dict[str, Any]:
     """老档兼容（幂等）：家属记录里的 position 过去存的是「与死者关系」。
 
     现在 position 改存该家属自己的岗位、关系移入 identity，这里把老值搬到新槽位。
-    只在 identity 为空时才搬，避免覆盖用户已按新口径录入的数据。
+
+    判据是 identity 键**不存在**，而非"值为空"：新口径的人记录由
+    _person_from_flat 生成，PERSON_BASE_FIELDS 的键一律存在（可能是空串）。
+    若按"值为空"判断，会把新档里"填了岗位、还没填关系"的家属误判成老档，
+    把岗位当成关系搬进身份栏。
     """
     reps = flat.get("family_reps")
     if not reps:
         return flat
     migrated = []
     for fr in reps:
-        if (isinstance(fr, dict) and fr.get("position")
-                and not str(fr.get("identity") or "").strip()):
+        if isinstance(fr, dict) and "identity" not in fr and fr.get("position"):
             fr = dict(fr)
             fr["identity"] = fr.pop("position")
         migrated.append(fr)
@@ -3996,11 +3999,13 @@ class MainWindow(QWidget, Ui_Form):
             self._set_combo_or_type(self.company_pane, _txt(person, 'unit'))
 
     def _person_to_flat(self, role: str, person: Dict[str, Any]):
-        """统一人记录 → 兼容扁平中文键（本人姓名/证人姓名/…，经 set_data 入 basic_info）"""
+        """统一人记录 → 兼容扁平中文键（本人姓名/证人姓名/…，经 set_data 入 basic_info）
+
+        空值也要写。表单是该角色数据的唯一来源，跳过空值会让"清空输入框"传不进来，
+        旧值残留在扁平键里、下次保存照样写进笔录与文书。
+        """
         for field in PERSON_BASE_FIELDS:
-            val = person.get(field)
-            if val:
-                self.set_data(person_flat_key(role, field), val, 'basic')
+            self.set_data(person_flat_key(role, field), person.get(field) or '', 'basic')
 
     def _person_from_flat(self, role: str) -> Dict[str, Any]:
         """兼容扁平中文键 → 统一人记录（英文 schema，字符串；缺值置空）"""
@@ -4130,11 +4135,12 @@ class MainWindow(QWidget, Ui_Form):
         self.witness_combo.blockSignals(False)
 
     def _mirror_witness_to_flat(self, w: Dict[str, Any]):
-        """把统一证人记录（英文 schema）同步到扁平 证人* 键（供模板/AI 兼容使用）"""
+        """把统一证人记录（英文 schema）同步到扁平 证人* 键（供模板/AI 兼容使用）
+
+        空值同样要写，理由见 _person_to_flat：否则清空证人某个字段传不进去。
+        """
         for field in PERSON_BASE_FIELDS:
-            val = w.get(field, "")
-            if val:
-                self.set_data(person_flat_key("证人", field), val, 'basic')
+            self.set_data(person_flat_key("证人", field), w.get(field) or '', 'basic')
 
     def _sync_form_to_current_witness(self):
         """把表单内容写回当前证人，并同步扁平 证人* 键"""
