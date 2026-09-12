@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import shutil
 import datetime
 import logging
 from typing import Dict, List, Any, Tuple, Optional
@@ -83,7 +84,9 @@ def _witness_label(n: int) -> str:
 
 # 一份"人记录"的规范英文键。case_obj 顶层的 本人 即 role=本人 的记录；
 # 证人 / 法人 数组元素 = 同样这些字段 + role(+ 可选 seq / materials)。
-PERSON_BASE_FIELDS = ("name", "gender", "age", "id_card", "address", "phone", "position", "identity")
+# unit = 该人自己的工作单位，各自独立（证人/家属不必与案件用人单位相同）。
+PERSON_BASE_FIELDS = ("name", "gender", "age", "id_card", "address", "phone",
+                      "position", "identity", "unit")
 
 # 案件级：用人单位性质（企业 / 机关（公务员） / 事业单位），默认企业
 UNIT_TYPES = ["企业", "机关（公务员）", "事业单位"]
@@ -99,9 +102,18 @@ PERSON_CN_SUFFIX = {
     "address": "身份证地址",
     "phone": "手机号",
     "identity": "身份",
+    "unit": "单位名称",
 }
-# position 语义随角色：扁平兼容键 本人岗位/证人岗位/法人职务
-_FLAT_POSITION_SUFFIX = {"本人": "岗位", "证人": "岗位", "法人": "职务", "家属": "与死者关系"}
+# position 语义随角色：扁平兼容键 本人岗位/证人岗位/法人职务/家属岗位
+_FLAT_POSITION_SUFFIX = {"本人": "岗位", "证人": "岗位", "法人": "职务", "家属": "岗位"}
+
+# 「身份」输入行在各角色下的语义：家属填的是与死者的关系，其余填用工身份
+_ROLE_IDENTITY_LABEL = {"本人": "本人身份：", "证人": "证人身份：",
+                        "法人": "法人身份：", "家属": "与死者关系："}
+_ROLE_IDENTITY_HINT = {"本人": "职工 / 公务员 / 事业编制工作人员 等",
+                       "证人": "该谈话人身份：职工 / 公务员 / 事业编制工作人员 等",
+                       "法人": "该谈话人身份：法定代表人 / 负责人 等",
+                       "家属": "该家属与死者的关系：配偶 / 子女 / 父母 等"}
 
 
 def person_flat_key(role: str, field: str) -> str:
@@ -109,6 +121,86 @@ def person_flat_key(role: str, field: str) -> str:
     if field == "position":
         return f"{role}{_FLAT_POSITION_SUFFIX.get(role, '岗位')}"
     return f"{role}{PERSON_CN_SUFFIX.get(field, field)}"
+
+
+# ============================================================================
+# cases_data.json 磁盘结构（v3：案本号下按人分块）
+# ----------------------------------------------------------------------------
+#   { "version": "3.0", "cases": { "案本号": {
+#         "case_id":       "案本号",
+#         "case_info":     { …案件级 + 流程/扩展字段… },
+#         "injured_worker":{ …本人（受伤职工）… },
+#         "witnesses":     [ …N 位证人，每人一条人记录… ],
+#         "legal_reps":    [ …法人… ],
+#         "family_reps":   [ …家属（工亡）… ],
+#   }}}
+#
+# 内存里仍沿用"本人字段平铺在顶层"的 flat 形态（下游 80+ 处 case_obj.get('name')
+# 等读取、提示词填充、模板渲染都不用动），只在读写磁盘的两个函数里做投影：
+#   _load_cases_data: 磁盘分块 --unpack_case--> flat
+#   _save_cases_data: flat --pack_case--> 磁盘分块
+# ============================================================================
+
+# 归入 "injured_worker" 块的键（其余一律进 "case_info"）
+_INJURED_WORKER_FIELDS = ("name", "gender", "age", "id_card", "address", "phone",
+                          "position", "identity", "unit",
+                          "injury_description", "materials")
+# 本身就是独立"人块"的键，不重复进 case_info
+_NAMED_BLOCKS = ("witnesses", "legal_reps", "family_reps")
+# 已在块顶单独占位的键，同样不重复进 case_info
+_TOP_LEVEL_KEYS = ("case_id",)
+
+
+def pack_case(flat: Dict[str, Any]) -> Dict[str, Any]:
+    """内存 flat 案件对象 → 磁盘分块结构（v3）"""
+    worker = {k: flat[k] for k in _INJURED_WORKER_FIELDS if k in flat}
+    _skip = _INJURED_WORKER_FIELDS + _NAMED_BLOCKS + _TOP_LEVEL_KEYS
+    info = {k: v for k, v in flat.items() if k not in _skip}
+    return {
+        "case_id": flat.get("case_id", ""),
+        "case_info": info,
+        "injured_worker": worker,
+        "witnesses": list(flat.get("witnesses") or []),
+        "legal_reps": list(flat.get("legal_reps") or []),
+        "family_reps": list(flat.get("family_reps") or []),
+    }
+
+
+def unpack_case(block: Dict[str, Any]) -> Dict[str, Any]:
+    """磁盘分块结构（v3）→ 内存 flat 案件对象。
+
+    遇 v2 平铺结构（无 injured_worker 块）原样返回，实现老档向后兼容。
+    """
+    if not isinstance(block, dict):
+        return {}
+    if "injured_worker" not in block:
+        return dict(block)
+    flat = dict(block.get("case_info") or {})
+    flat["case_id"] = block.get("case_id", "") or flat.get("case_id", "")
+    flat.update(block.get("injured_worker") or {})
+    for blk in _NAMED_BLOCKS:
+        flat[blk] = list(block.get(blk) or [])
+    return flat
+
+
+def migrate_case(flat: Dict[str, Any]) -> Dict[str, Any]:
+    """老档兼容（幂等）：家属记录里的 position 过去存的是「与死者关系」。
+
+    现在 position 改存该家属自己的岗位、关系移入 identity，这里把老值搬到新槽位。
+    只在 identity 为空时才搬，避免覆盖用户已按新口径录入的数据。
+    """
+    reps = flat.get("family_reps")
+    if not reps:
+        return flat
+    migrated = []
+    for fr in reps:
+        if (isinstance(fr, dict) and fr.get("position")
+                and not str(fr.get("identity") or "").strip()):
+            fr = dict(fr)
+            fr["identity"] = fr.pop("position")
+        migrated.append(fr)
+    flat["family_reps"] = migrated
+    return flat
 
 
 # 角色 → 谈话笔录生成配置（提示词 key / 笔录 docx 模板 / 模板占位符数据方法）——单一事实源
@@ -342,10 +434,11 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'idnumer_pane': '330324195003016666',
   'textEdit': '浙江省永嘉县上塘镇AA村12号',
   'lineEdit_4': '13700002222',
-  'lineEdit_5': '母子',
+  'lineEdit_5': '',            # 家属自己的岗位（无单位 → 留空）
+  'identity': '母子',          # 家属这一栏＝与死者关系
   'injured_worker': '王五',
   'comboBox': 7,
-  'company_pane': '温州YY建筑劳务有限公司',
+  'company_pane': '',          # 家属无单位 → 岗位一并留空
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
   'statement_edit': '我单位职工王五，男，1975年1月1日出生。2026年8月2日上午在工地工作时突发疾病，经送医抢救无效于当日18时死亡（诊断：心源性猝死）。单位拟申请认定工亡，故由我单位作为申请人。',
@@ -361,10 +454,11 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'idnumer_pane': '330324198511223333',
   'textEdit': '浙江省永嘉县黄田街道CC路3号',
   'lineEdit_4': '13600003333',
-  'lineEdit_5': '夫妻',
+  'lineEdit_5': '缝纫工',      # 家属自己的岗位
+  'identity': '夫妻',          # 家属这一栏＝与死者关系
   'injured_worker': '赵六',
   'comboBox': 7,
-  'company_pane': '温州YY建筑劳务有限公司',
+  'company_pane': '温州XX服装有限公司',   # 家属自己的工作单位（独立于死者单位）
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
   'statement_edit': '我丈夫赵六，男，1981年11月22日出生。2026年8月2日在工地作业时突发疾病，送医抢救无效于当日18时死亡。单位未及时申报，我作为死者近亲属（配偶）自行申请认定工亡，请核实劳动关系、参保及单位是否未及时申报情况。',
@@ -406,6 +500,42 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'statement_edit': '刘大于2026年7月20日在工地受伤后自行申请认定工伤，我作为工友可佐证其考勤与受伤经过。',
   'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
                 {'name': '劳动合同', 'provided': False, 'notes': ''}]},
+ {'name': '个人申请×工伤 证人·其它单位(孙七/刘大)',
+  'role': '证人',
+  'deathCaseCheckbox': False,
+  'personalApplicationCheckbox': True,
+  'name_pane': '孙七',
+  'idnumer_pane': '330324199312058888',
+  'textEdit': '浙江省永嘉县三江街道GG路7号',
+  'lineEdit_4': '13200007777',
+  'lineEdit_5': '送货员',            # 证人自己的岗位
+  'identity': '职工',
+  'injured_worker': '刘大',
+  'comboBox': 0,
+  'company_pane': '永嘉ZZ物流有限公司',   # 证人来自其它单位，与案件用人单位不同
+  'construction_company': '永嘉县XX建设工程有限公司',
+  'construction_plant': 'ZZ新城项目一期工地',
+  'statement_edit': '我是给该工地送货的，2026年7月20日送货时目睹刘大被坠落钢管砸伤右手，可以佐证他的受伤经过。',
+  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''}]},
+ {'name': '单位申请×工伤 法人(王老板/张三)',
+  'role': '法人',
+  'deathCaseCheckbox': False,
+  'personalApplicationCheckbox': False,
+  'name_pane': '王老板',
+  'idnumer_pane': '330324197005203333',
+  'textEdit': '浙江省永嘉县瓯北街道FF路20号',
+  'lineEdit_4': '13300006666',
+  'lineEdit_5': '总经理',            # 法人这一栏＝职务
+  'identity': '法定代表人',          # 法人这一栏＝身份
+  'injured_worker': '张三',
+  'comboBox': 0,
+  'company_pane': '温州YY建筑劳务有限公司',
+  'construction_company': '永嘉县XX建设工程有限公司',
+  'construction_plant': 'ZZ新城项目一期工地',
+  'statement_edit': '我单位职工张三于2026年7月20日在工地受伤，单位申请认定工伤。',
+  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                {'name': '营业执照', 'provided': True, 'notes': ''},
+                {'name': '法定代表人身份证明', 'provided': True, 'notes': ''}]},
  {'name': '机关公务员×工伤 本人(孙某)',
   'role': '本人',
   'deathCaseCheckbox': False,
@@ -814,7 +944,8 @@ class CaseDataReviewDialog(QDialog):
 
         self.json_edit = QTextEdit()
         self.json_edit.setFont(QFont("Consolas", 10))
-        self.json_edit.setPlainText(json.dumps(case_obj, ensure_ascii=False, indent=2))
+        # 展示与存盘一致的 v3 分块结构（case_info / injured_worker / witnesses / …）
+        self.json_edit.setPlainText(json.dumps(pack_case(case_obj), ensure_ascii=False, indent=2))
         root.addWidget(self.json_edit, 1)
 
         btns = QHBoxLayout()
@@ -841,7 +972,8 @@ class CaseDataReviewDialog(QDialog):
             obj = json.loads(text)
             if not isinstance(obj, dict):
                 raise ValueError("JSON 顶层必须是对象 {…}")
-            self._case_obj = obj
+            # 分块结构 → 内存 flat（用户把块删了则按原样透传，不阻断）
+            self._case_obj = unpack_case(obj)
             self.accept()
         except Exception as e:
             QMessageBox.warning(self, "JSON 格式错误", f"无法解析 JSON：\n{str(e)}\n\n请修正后再保存。")
@@ -1177,6 +1309,12 @@ class MainWindow(QWidget, Ui_Form):
         regulation_full = self.comboBox.currentText().strip()
         regulation_short = self.get_data('拟用条例', '') or _regulation_full_to_short(regulation_full)
 
+        # 本人单位＝案件级用人单位。仅当前角色是「本人」时才采信「用人单位」控件里
+        # 尚未保存的手输值——其余角色下该控件代表的是那个人自己的工作单位。
+        self_unit = self.get_data('用人单位', '') or (
+            self.company_pane.currentText().strip()
+            if self.get_current_role_type() == '本人' else '')
+
         data = {
             'case_id': self.lineEdit_2.text().strip() or self.get_data('案本号', '') or self.current_case_id,
             'case_nature': '工亡案件' if self.death_case_checkbox.isChecked() else '工伤案件',
@@ -1199,7 +1337,8 @@ class MainWindow(QWidget, Ui_Form):
             'unit_type': (self.unit_type_combo.currentText().strip() if hasattr(self, 'unit_type_combo')
                           else '') or DEFAULT_UNIT_TYPE,
             'employer': self.get_data('用工单位', '') or self.construction_company.currentText().strip(),
-            'labor_unit': self.get_data('用人单位', '') or self.company_pane.currentText().strip(),
+            'labor_unit': self_unit,
+            'unit': self_unit,
             'site': self.get_data('工地名称', '') or self.construction_plant.currentText().strip(),
             'injury_desc': self.statement_edit.toPlainText().strip() if hasattr(self, 'statement_edit')
                            else self.get_data('受伤经过', ''),
@@ -1295,11 +1434,14 @@ class MainWindow(QWidget, Ui_Form):
         if hasattr(self, 'identity_edit'):
             self.identity_edit.setText(str(case_obj.get('identity', DEFAULT_IDENTITY)) or DEFAULT_IDENTITY)
         self.set_data('本人身份', str(case_obj.get('identity', DEFAULT_IDENTITY)) or DEFAULT_IDENTITY, 'basic')
+        self.set_data('本人单位名称', case_obj.get('unit', ''), 'basic')
         self.textEdit.setPlainText(str(case_obj.get('address', '')))
         self.set_data('本人身份证地址', case_obj.get('address', ''), 'basic')
 
         # 单位信息（company_pane=用人单位，construction_company=用工单位）
-        self._set_combo_or_type(self.company_pane, case_obj.get('labor_unit', ''))
+        # 只写数据模型，不直接推控件：company_pane 是共享控件，其 currentTextChanged
+        # 会把值写进*当前角色*的 unit 槽，非本人角色下推案件级值会污染该人的单位。
+        # 控件由方法末尾的 _restore_role_unit() 按角色回填。
         self.set_data('用人单位', case_obj.get('labor_unit', ''), 'company')
         self._set_combo_or_type(self.construction_company, case_obj.get('employer', ''))
         self.set_data('用工单位', case_obj.get('employer', ''), 'company')
@@ -1327,7 +1469,7 @@ class MainWindow(QWidget, Ui_Form):
                     self.set_data(person_flat_key('法人', field), val, 'basic')
             self.data_model.investigation['法人材料'] = lr.get('materials', [])
 
-        # 家属信息回写（工亡案单条 → 家属* 扁平兼容键，含 与死者关系）
+        # 家属信息回写（工亡案单条 → 家属* 扁平兼容键，含 与死者关系/单位/岗位）
         family_reps = case_obj.get('family_reps', [])
         if family_reps:
             fr = family_reps[0]
@@ -1335,6 +1477,9 @@ class MainWindow(QWidget, Ui_Form):
                 val = fr.get(field)
                 if val:
                     self.set_data(person_flat_key('家属', field), val, 'basic')
+
+        # 上面把「用人单位」写成了案件级值；若当前不在本人角色，要换回该角色自己的单位
+        self._restore_role_unit()
 
         # 刷新模板字典缓存
         self._template_dict = self.data_model.to_template_dict()
@@ -1357,18 +1502,32 @@ class MainWindow(QWidget, Ui_Form):
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             if isinstance(data, dict) and isinstance(data.get('cases'), dict):
-                return data['cases']
+                # 磁盘分块结构 → 内存 flat（v2 老档原样返回，见 unpack_case）
+                return {cid: migrate_case(unpack_case(blk))
+                        for cid, blk in data['cases'].items()}
         except Exception as e:
             print(f"⚠️ 加载案件数据失败: {e}")
         return {}
 
+    def _backup_cases_data(self, path: str) -> None:
+        """首次由 v2 升级到 v3 之前，把原 cases_data.json 备份为 .bak（只备份一次）"""
+        bak = path + '.bak'
+        if os.path.exists(path) and not os.path.exists(bak):
+            try:
+                shutil.copy2(path, bak)
+                print(f"📦 升级前已备份原案件数据: {bak}")
+            except Exception as e:
+                print(f"⚠️ 备份案件数据失败（继续）: {e}")
+
     def _save_cases_data(self, cases: Dict[str, Any]) -> bool:
-        """保存全部案件数据到 cases_data.json"""
+        """保存全部案件数据到 cases_data.json（内存 flat → 磁盘分块 v3）"""
         path = self._cases_data_path()
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            self._backup_cases_data(path)
+            packed = {cid: pack_case(c) for cid, c in cases.items()}
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump({"version": "2.0", "cases": cases}, f, ensure_ascii=False, indent=2)
+                json.dump({"version": "3.0", "cases": packed}, f, ensure_ascii=False, indent=2)
             print(f"✅ 案件数据已保存: {path}（共 {len(cases)} 个案件）")
             return True
         except Exception as e:
@@ -1775,6 +1934,7 @@ class MainWindow(QWidget, Ui_Form):
             "address": data.get('address', ''),
             "position": data.get('position', ''),
             "identity": data.get('identity', DEFAULT_IDENTITY),
+            "unit": data.get('unit', '') or self.get_data('本人单位名称', ''),
             "injury_description": data.get('injury_desc', ''),
             "materials": _filter_provided(materials),
             # ── 记录人 / 证人 ──
@@ -1907,12 +2067,16 @@ class MainWindow(QWidget, Ui_Form):
                 '受伤经过': case_obj.get('injury_description', ''),
                 '家属姓名': self.get_data('家属姓名', ''),
                 '家属身份证号': self.get_data('家属身份证号', ''),
-                '与死者关系': self.get_data('家属与死者关系', ''),
+                '与死者关系': self.get_data('家属身份', ''),
+                '家属单位名称': self.get_data('家属单位名称', ''),
+                # 家属没单位 → 岗位一并留空（与笔录表头同一口径）
+                '家属岗位': (self.get_data('家属岗位', '')
+                             if self.get_data('家属单位名称', '') else ''),
                 '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-                '家属身份': self.get_data('家属身份', '') or DEFAULT_IDENTITY,
+                '家属身份': self.get_data('家属身份', ''),
                 '身份话术': self._identity_wording_hint(
                     case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-                    self.get_data('家属身份', '') or DEFAULT_IDENTITY, '家属'),
+                    self.get_data('家属身份', ''), '家属'),
             }
         # 本人：复用统一模板数据（中文+英文 key 富余项替换无害），并附身份话术
         base = self._build_unified_template_data(case_obj)
@@ -2145,7 +2309,12 @@ class MainWindow(QWidget, Ui_Form):
         }
 
     def _build_family_template_data(self, case_obj: dict) -> dict:
-        """构建家属谈话笔录模板的占位符数据（被询问人=工亡职工近亲属；本人姓名 指死者）"""
+        """构建家属谈话笔录模板的占位符数据（被询问人=工亡职工近亲属；本人姓名 指死者）
+
+        表头那行描述的是「家属自己的单位」：家属单位名称 逐字取自「用人单位」控件
+        （本人角色下才是案件级用人单位）。家属没单位时，岗位一并留空。
+        """
+        fam_unit = self.get_data('家属单位名称', '')
         return {
             '当前时期': self.get_data('当前时期', '') or (_date_now() + _time_now()),
             '用户名': self._get_current_username(),
@@ -2156,10 +2325,12 @@ class MainWindow(QWidget, Ui_Form):
             '家属身份证号': self.get_data('家属身份证号', ''),
             '家属身份证地址': self.get_data('家属身份证地址', ''),
             '家属手机号': self.get_data('家属手机号', ''),
-            '与死者关系': self.get_data('家属与死者关系', ''),
+            '与死者关系': self.get_data('家属身份', ''),
+            '家属单位名称': fam_unit,
+            '家属岗位': self.get_data('家属岗位', '') if fam_unit else '',
             '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
             '单位名称': case_obj.get('labor_unit', ''),
-            '家属身份': self.get_data('家属身份', '') or DEFAULT_IDENTITY,
+            '家属身份': self.get_data('家属身份', ''),
             '公司名称': case_obj.get('labor_unit', ''),  # 用人单位（签合同的单位）
         }
 
@@ -2339,6 +2510,9 @@ class MainWindow(QWidget, Ui_Form):
             w.update(self._read_form_as_person())
             # 指向该证人，避免索引无效导致生成/回填拿不到证人数据
             self.data_model.current_witness_index = self.data_model.witnesses.index(w)
+            # 同步扁平 证人* 键：本人/法人/家属分支走 _person_to_flat，证人需显式镜像，
+            # 否则扁平键会停留在上一位证人（F2 轮换后生成笔录会拿到旧值）
+            self._mirror_witness_to_flat(w)
         else:
             # 本人 / 法人 / 家属：表单 → 角色前缀扁平兼容键（统一走 _read_form_as_person）
             self._person_to_flat(role, self._read_form_as_person())
@@ -2389,10 +2563,21 @@ class MainWindow(QWidget, Ui_Form):
 
     def on_role_changed(self):
         """当角色切换时调用"""
-        print(f"🔄 角色切换: {self.get_current_role_type()}")
-        # 共享“身份”输入行的标签随角色变化
+        role = self.get_current_role_type()
+        print(f"🔄 角色切换: {role}")
+        # 共享“身份”输入行的标签/提示随角色变化（家属这一栏填的是与死者关系）
         if hasattr(self, 'identity_label'):
-            self.identity_label.setText(f"{self.get_current_role_type()}身份：")
+            text = _ROLE_IDENTITY_LABEL.get(role, _ROLE_IDENTITY_LABEL["本人"])
+            self.identity_label.setText(text)
+            # 文本变长（如「与死者关系：」）时左移加宽，右缘与输入框保持 6px 间距
+            right = self.identity_edit.x() - 6
+            w = max(78, self.identity_label.fontMetrics().horizontalAdvance(text) + 2)
+            self.identity_label.setGeometry(right - w, self.identity_label.y(), w,
+                                            self.identity_label.height())
+        if hasattr(self, 'identity_edit'):
+            self.identity_edit.setToolTip(_ROLE_IDENTITY_HINT.get(role, ""))
+            # 家属这一栏无通用默认值，清掉占位符「职工」避免误读
+            self.identity_edit.setPlaceholderText("" if role == "家属" else DEFAULT_IDENTITY)
 
     def _setup_paths(self):
         """统一使用PathUtils设置所有路径"""
@@ -3774,7 +3959,11 @@ class MainWindow(QWidget, Ui_Form):
     # ========================================================================
 
     def _read_form_as_person(self) -> Dict[str, Any]:
-        """把共享表单控件读成统一人记录（英文 schema，不含 role）"""
+        """把共享表单控件读成统一人记录（英文 schema，不含 role）
+
+        unit 取「用人单位」控件：本人角色下即案件级用人单位，其余角色下是
+        该人自己的工作单位（证人/家属不必与案件用人单位相同）。
+        """
         return {
             'name': self.name_pane.text().strip(),
             'gender': self.lineEdit.text().strip(),
@@ -3785,6 +3974,7 @@ class MainWindow(QWidget, Ui_Form):
             'position': self.lineEdit_5.text().strip(),
             'identity': (self.identity_edit.text().strip()
                          if hasattr(self, 'identity_edit') else ''),
+            'unit': self.company_pane.currentText().strip(),
         }
 
     def _write_person_to_form(self, person: Dict[str, Any]):
@@ -3802,6 +3992,8 @@ class MainWindow(QWidget, Ui_Form):
         self.lineEdit_5.setText(_txt(person, 'position'))
         if hasattr(self, 'identity_edit'):
             self.identity_edit.setText(_txt(person, 'identity'))
+        if hasattr(self, 'company_pane'):
+            self._set_combo_or_type(self.company_pane, _txt(person, 'unit'))
 
     def _person_to_flat(self, role: str, person: Dict[str, Any]):
         """统一人记录 → 兼容扁平中文键（本人姓名/证人姓名/…，经 set_data 入 basic_info）"""
@@ -3816,6 +4008,21 @@ class MainWindow(QWidget, Ui_Form):
             field: str(self.get_data(person_flat_key(role, field), '') or '')
             for field in PERSON_BASE_FIELDS
         }
+
+    def _restore_role_unit(self):
+        """把「用人单位」控件回填成*当前角色自己的*单位。
+
+        本人 → 案件级用人单位；证人/法人/家属 → 该人记录里的 unit。
+        该控件是共享的，若不用角色自己的值回填，换角色后会串数据。
+        """
+        if not hasattr(self, 'company_pane'):
+            return
+        role = self.get_current_role_type()
+        if role == "本人":
+            self._set_combo_or_type(self.company_pane, self.get_data('用人单位', ''))
+        else:
+            self._set_combo_or_type(
+                self.company_pane, self.get_data(person_flat_key(role, 'unit'), ''))
 
     def clear_role_fields(self):
         """
@@ -3833,6 +4040,10 @@ class MainWindow(QWidget, Ui_Form):
 
         # 当角色切换时，更新按钮状态
         self.on_role_changed()
+
+        # 「用人单位」控件按角色回填（本人＝案件级用人单位，跨角色保留；
+        # 其余角色＝该人自己的工作单位，上面 _clear_role_data 已清空故为空白待录）
+        self._restore_role_unit()
 
         # 切换回本人时清空案本号，输入新姓名后自动生成
         if role == "本人":
@@ -4709,9 +4920,20 @@ class MainWindow(QWidget, Ui_Form):
         self.construction_plant.setCurrentIndex(-1)
 
     def company(self):
-        """更新用人单位信息（company_pane 现为用人单位）"""
-        employer_name = self.company_pane.currentText().strip()
-        self.set_data('用人单位', employer_name, 'company')
+        """「用人单位」控件变化时同步数据。
+
+        本人角色 → 案件级用人单位（全案文书共用）；其余角色 → 该人记录里的 unit。
+        证人/家属的工作单位不必与案件用人单位相同，故不能一律写入案件级。
+        """
+        name = self.company_pane.currentText().strip()
+        try:
+            role = self.get_current_role_type()
+        except Exception:
+            role = "本人"
+        if role == "本人":
+            self.set_data('用人单位', name, 'company')
+        else:
+            self.set_data(person_flat_key(role, 'unit'), name, 'basic')
 
     def sync_employer_to_dict(self):
         """更新用工单位信息（construction_company 现为用工单位）"""
@@ -4785,6 +5007,8 @@ class MainWindow(QWidget, Ui_Form):
             self._person_to_flat(role, person)
 
             if role == "本人":
+                # 本人的「单位」即案件级用人单位（其余角色只写各自的 单位名称）
+                self.set_data('用人单位', person.get('unit', ''), 'company')
                 # 自动生成案本号
                 current_case = self.lineEdit_2.text().strip()
                 if not current_case:
