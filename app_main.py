@@ -152,6 +152,27 @@ _NAMED_BLOCKS = ("witnesses", "legal_reps", "family_reps")
 # 已在块顶单独占位的键，同样不重复进 case_info
 _TOP_LEVEL_KEYS = ("case_id",)
 
+# 当前磁盘结构版本。读到更高版本时说明是更新版程序写的，不能静默按旧结构处理。
+SCHEMA_VERSION = "3.0"
+
+# 保存前的备份层
+_BACKUP_DIR = "backups"        # 每日快照目录（与 cases_data.json 同级）
+_SNAPSHOT_KEEP = 30            # 每日快照保留份数
+
+
+def version_tuple(text) -> Optional[Tuple[int, ...]]:
+    """'3.0' → (3, 0)。无法解析（缺失/乱填）返回 None。"""
+    try:
+        return tuple(int(p) for p in str(text).split('.'))
+    except Exception:
+        return None
+
+
+def is_newer_version(disk_version) -> bool:
+    """磁盘上的版本是否高于本程序支持的版本"""
+    a, b = version_tuple(disk_version), version_tuple(SCHEMA_VERSION)
+    return bool(a and b and a > b)
+
 
 def pack_case(flat: Dict[str, Any]) -> Dict[str, Any]:
     """内存 flat 案件对象 → 磁盘分块结构（v3）"""
@@ -1506,37 +1527,97 @@ class MainWindow(QWidget, Ui_Form):
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            if isinstance(data, dict) and isinstance(data.get('cases'), dict):
-                # 磁盘分块结构 → 内存 flat（v2 老档原样返回，见 unpack_case）
-                return {cid: migrate_case(unpack_case(blk))
-                        for cid, blk in data['cases'].items()}
+            if not (isinstance(data, dict) and isinstance(data.get('cases'), dict)):
+                logger.error("❌ 案件数据文件结构异常（顶层缺少 cases 对象）: %s", path)
+                return {}
+            disk_version = data.get('version')
+            if is_newer_version(disk_version):
+                logger.error(
+                    "❌ 案件数据版本(%s)高于本程序支持的(%s)——应是更新版程序写的。"
+                    "保存时会先自动备份原文件，但请尽快改用新版程序打开，"
+                    "否则新版本新增的字段可能在这里丢失。",
+                    disk_version, SCHEMA_VERSION)
+            # 磁盘分块结构 → 内存 flat（v2 老档原样返回，见 unpack_case）
+            return {cid: migrate_case(unpack_case(blk))
+                    for cid, blk in data['cases'].items()}
         except Exception as e:
-            logger.warning(f"⚠️ 加载案件数据失败: {e}")
+            logger.error("❌ 加载案件数据失败: %s", e)
         return {}
 
+    @staticmethod
+    def _peek_version(path: str) -> str:
+        """只读文件开头取 version，避免为一行版本号解析整份案卷"""
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                head = f.read(256)
+            m = re.search(r'"version"\s*:\s*"([^"]*)"', head)
+            return m.group(1) if m else ''
+        except Exception:
+            return ''
+
     def _backup_cases_data(self, path: str) -> None:
-        """首次由 v2 升级到 v3 之前，把原 cases_data.json 备份为 .bak（只备份一次）"""
-        bak = path + '.bak'
-        if os.path.exists(path) and not os.path.exists(bak):
+        """保存前的三层备份（任一层失败都不阻断保存）：
+
+        1) <path>.v2.bak —— 仅首次：升级前的老档原样留一份，便于退回旧版程序
+        2) <path>.bak    —— 每次保存前刷新，相当于「撤销上一次保存」
+        3) backups/cases_data_YYYYMMDD.json —— 每天第一份，滚动保留 _SNAPSHOT_KEEP 天
+
+        原先只在 .bak 不存在时备份一次，于是 .bak 永远停在首次升级时的状态，
+        用户之后改坏数据时它早已不是有效的回滚点。
+        """
+        if not os.path.exists(path):
+            return
+        try:
+            legacy = path + '.v2.bak'
+            if not os.path.exists(legacy) and self._peek_version(path) not in ('', SCHEMA_VERSION):
+                shutil.copy2(path, legacy)
+                print(f"📦 已保留升级前的原案件数据: {legacy}")
+
+            shutil.copy2(path, path + '.bak')
+            self._daily_snapshot(path)
+        except Exception as e:
+            logger.warning("⚠️ 备份案件数据失败（继续）: %s", e)
+
+    def _daily_snapshot(self, path: str) -> None:
+        """当天第一份快照；顺带清掉过老的快照"""
+        backup_dir = os.path.join(os.path.dirname(path), _BACKUP_DIR)
+        os.makedirs(backup_dir, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d")
+        dest = os.path.join(backup_dir, f"cases_data_{stamp}.json")
+        if os.path.exists(dest):
+            return
+        shutil.copy2(path, dest)
+        logger.info("📦 已生成当日案件数据快照: %s", dest)
+        stale = sorted(f for f in os.listdir(backup_dir)
+                       if f.startswith("cases_data_") and f.endswith(".json"))
+        for old in stale[:-_SNAPSHOT_KEEP]:
             try:
-                shutil.copy2(path, bak)
-                print(f"📦 升级前已备份原案件数据: {bak}")
-            except Exception as e:
-                logger.warning(f"⚠️ 备份案件数据失败（继续）: {e}")
+                os.remove(os.path.join(backup_dir, old))
+            except Exception:
+                pass
 
     def _save_cases_data(self, cases: Dict[str, Any]) -> bool:
-        """保存全部案件数据到 cases_data.json（内存 flat → 磁盘分块 v3）"""
+        """保存全部案件数据到 cases_data.json（内存 flat → 磁盘分块 v3）
+
+        先写临时文件再原子替换：直接以 'w' 打开会立刻截断原文件，写到一半
+        崩溃或磁盘写满，整份案卷就没了。
+        """
         path = self._cases_data_path()
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             self._backup_cases_data(path)
             packed = {cid: pack_case(c) for cid, c in cases.items()}
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump({"version": "3.0", "cases": packed}, f, ensure_ascii=False, indent=2)
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({"version": SCHEMA_VERSION, "cases": packed},
+                          f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
             print(f"✅ 案件数据已保存: {path}（共 {len(cases)} 个案件）")
             return True
         except Exception as e:
-            logger.error(f"❌ 保存案件数据失败: {e}")
+            logger.error("❌ 保存案件数据失败: %s", e)
             return False
 
     def _update_case_field(self, case_number: str, **fields) -> bool:
