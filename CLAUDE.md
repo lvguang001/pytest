@@ -81,7 +81,6 @@ _save_cases_data:  flat --pack_case()-------> 磁盘分块
 - **`patch_templates_2026.py` 是幂等的补丁脚本**，里面写死了各角色笔录的表头文本。
   改了模板表头就必须同步改它，否则谁再跑一次补丁就把你的改动覆盖回去
 - **`*.bak.docx` 是补丁脚本生成的备份**，已 gitignore，不用管
-- **`resource/模板文件/谈话模板 - 副本/` 未被任何代码引用**（18 份多案型模板躺着没用）
 - **Windows 控制台 codepage 936**：在 `cmd` 里跑 pytest，中文测试名显示为乱码；
   Cursor/Windows Terminal（UTF-8）正常
 - **`MainWindow` 构造很重**（路径、服务、AI 客户端、组合框数据），
