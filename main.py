@@ -39,6 +39,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QStyle
 from path_utils import path_utils
+import log_utils
 
 
 # ============================================================================
@@ -189,6 +190,11 @@ class PasswordLineEdit(QLineEdit):
 
 def main():
     """主函数 - 直接启动主窗口"""
+    # 尽早配置日志与全局异常兜底：此后窗口构建期间的异常都会留下记录
+    log_utils.setup_logging(str(path_utils.get_data_path("logs")))
+    log_utils.install_excepthook()
+    log_utils.install_qt_message_handler()
+
     app = QApplication(sys.argv)
     app.setApplicationName("工伤助手")
 

@@ -238,23 +238,29 @@ class ConfigService:
         os.makedirs(self.config_backup_dir, exist_ok=True)
 
     def _setup_logging(self):
-        """设置日志"""
-        log_dir = os.path.join(self.config_dir, "logs")
-        os.makedirs(log_dir, exist_ok=True)
+        """设置日志。
 
-        log_file = os.path.join(log_dir, "config_service.log")
-
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file, encoding='utf-8'),
-                logging.StreamHandler()
-            ]
-        )
-
+        根 logger 由 log_utils 统一配置（轮转文件 + 控制台），这里只取自己的
+        logger，消息冒泡到那些处理器即可——避免 basicConfig 再挂一套处理器、
+        变成同时写两个文件。若根 logger 尚无处理器（单独使用本模块时），
+        退回自建文件+控制台，保证日志有去处。
+        """
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"ConfigService 初始化完成，配置目录: {self.config_dir}")
+
+        if not logging.getLogger().handlers:
+            log_dir = os.path.join(self.config_dir, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                handlers=[
+                    logging.FileHandler(
+                        os.path.join(log_dir, "config_service.log"), encoding='utf-8'),
+                    logging.StreamHandler()
+                ]
+            )
+
+        self.logger.info("ConfigService 初始化完成，配置目录: %s", self.config_dir)
 
     # ============================================================================
     # 主要公共方法（保持不变）
