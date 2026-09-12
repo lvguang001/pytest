@@ -198,7 +198,8 @@ class Ui_Form(object):
         self.pushButton_2.setText(_translate("Form", "保存"))
         self.pushButton_3.setText(_translate("Form", "保存"))
         self.pushButton_5.setText(_translate("Form", "保存"))
-        self.label_12.setText(_translate("Form", "信息提示"))
+        # label_12 是身份证号校验提示位：常态留空，只在出错时显示消息
+        self.label_12.setText("")
         self.deathCaseCheckbox.setToolTip(_translate("Form", "勾选表示工亡案件，否则为工伤案件"))
         self.deathCaseCheckbox.setText(_translate("Form", "工亡案件"))
         self.personalApplicationCheckbox.setToolTip(_translate("Form", "勾选表示个人申请，否则为单位申请"))

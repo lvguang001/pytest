@@ -109,13 +109,15 @@ PERSON_CN_SUFFIX = {
 # position 语义随角色：扁平兼容键 本人岗位/证人岗位/法人职务/家属岗位
 _FLAT_POSITION_SUFFIX = {"本人": "岗位", "证人": "岗位", "法人": "职务", "家属": "岗位"}
 
-# 「身份」输入行在各角色下的语义：家属填的是与死者的关系，其余填用工身份
-_ROLE_IDENTITY_LABEL = {"本人": "本人身份：", "证人": "证人身份：",
-                        "法人": "法人身份：", "家属": "与死者关系："}
-_ROLE_IDENTITY_HINT = {"本人": "职工 / 公务员 / 事业编制工作人员 等",
+# 「身份」输入行在各角色下的语义：家属填的是与死者的关系，其余填用工身份。
+# 标签一律用短词（那行要和 电话/岗位 并排，长标签会把输入框挤没），
+# 完整语义放在 tooltip 里说明。
+_ROLE_IDENTITY_LABEL = {"本人": "身份：", "证人": "身份：",
+                        "法人": "身份：", "家属": "关系："}
+_ROLE_IDENTITY_HINT = {"本人": "本人身份：职工 / 公务员 / 事业编制工作人员 等",
                        "证人": "该谈话人身份：职工 / 公务员 / 事业编制工作人员 等",
                        "法人": "该谈话人身份：法定代表人 / 负责人 等",
-                       "家属": "该家属与死者的关系：配偶 / 子女 / 父母 等"}
+                       "家属": "家属与死者的关系：配偶 / 子女 / 父母 等"}
 
 
 def person_flat_key(role: str, field: str) -> str:
@@ -1177,6 +1179,18 @@ class MainWindow(QWidget, Ui_Form):
 
         self._install_todo_kanban()  # 待办事项看板（顶栏之下，含 60s 自动刷新）
 
+        # 放在最后：上面几个 _setup_xxx_ui() 会整体位移控件，
+        # 早调用会把方框画在位移前的位置上
+        # 布局微调。顺序有讲究：_move_unit_type_row 会整体下移下方的控件，
+        # 其余几条按当前坐标算位置，所以它必须最先执行。
+        self._move_unit_type_row()    # 单位性质移到案本号之下、独占一行
+        self._compact_identity_row()  # 身份并入电话/岗位行，收掉空行
+        self._move_time_fields_up()   # 时间字段移到拟用条例下方
+        self._compact_doc_buttons()   # 底部三个按钮并成一组
+        self._setup_status_boxes()    # 两处提示位的常显方框
+        self._relocate_talk_button()  # 谈话笔录按钮移到身份证导入之后
+        self._align_role_radios()     # 家属抬到与本人/证人/法人同一行
+
         print("=" * 50)
         print("🎉 MainWindow 初始化完成")
         print("=" * 50)
@@ -1630,6 +1644,206 @@ class MainWindow(QWidget, Ui_Form):
                         pass
         except Exception:
             pass
+
+    def _frame_for_label(self, lab, pad, name):
+        """在标签下面垫一个带边框的面板，返回该面板（常显，无文字时是空框）。
+
+        面板靠 lower 之后 raise 标签来保证不遮挡文字。
+        """
+        g = lab.geometry()
+        box = QFrame(self)
+        box.setObjectName(name)
+        box.setGeometry(g.x() - pad, g.y() - pad,
+                        g.width() + pad * 2, g.height() + pad * 2)
+        box.setStyleSheet(
+            f"#{name} {{ border: 1px solid #b8b8b8; border-radius: 4px;"
+            f" background: #fcfcfc; }}")
+        box.show()
+        lab.raise_()
+        return box
+
+    def _setup_status_boxes(self):
+        """给两处提示文字各垫一个常显的方框。
+
+        - label_14（左上，主提示区）：消息原先直接浮在背景上，既不显眼也看不出
+          边界，长消息还会被 341px 的宽度截断。加框并开启自动换行。
+        - label_12（身份证号右侧）：原先固定显示「信息提示」四个字，现改为空框，
+          只在身份证校验出错时显示消息。
+
+        必须在所有 _setup_xxx_ui() 之后调用——那些方法会整体位移控件，
+        早调用会按到位移前的坐标画框。
+        """
+        main = getattr(self, 'label_14', None)
+        if main is not None:
+            main.setWordWrap(True)     # 长消息换行，而不是被裁掉
+            main.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            self.status_box = self._frame_for_label(main, 6, "status_box")
+            # 左侧静态的「信息提示：」与框内首行对齐（原本停在框的垂直居中处）
+            if hasattr(self, 'label_15'):
+                self.label_15.move(self.label_15.x(), main.y())
+
+        idp = getattr(self, 'label_12', None)
+        if idp is not None:
+            self.status_box_id = self._frame_for_label(idp, 4, "status_box_id")
+
+    def _relocate_talk_button(self):
+        """把「谈话笔录」从主体角色单选那一行，移到下方「身份证导入」之后。
+
+        需与 _setup_status_boxes() 一样在所有 _setup_xxx_ui() 之后调用——
+        那些方法会整体位移控件，早调用会按位移前的坐标摆放。
+        """
+        talk = getattr(self, 'pushButton', None)          # 谈话笔录
+        id_in = getattr(self, 'pushButton_4', None)       # 身份证导入
+        ai = getattr(self, 'pushButton_ai_review', None)  # AI审查
+        if talk is None or id_in is None:
+            return
+
+        gap = 35                                          # 与原有按钮间距一致
+        talk.move(id_in.x() + id_in.width() + gap, id_in.y())
+        if ai is not None:                                # AI审查 顺延，不重叠
+            ai.move(talk.x() + talk.width() + gap, id_in.y())
+
+    def _move_unit_type_row(self):
+        """把「单位性质」从顶栏右侧移到「案本号」之下，独占一行。
+
+        原位置在顶栏右侧、和 工亡案件/个人案件 复选框挤在一行，离案本号很远；
+        现在标签与「案本号：」上下对齐，下拉框拉长占满整行。
+
+        插入整行要给下方让位，故把案本号行以下的左栏控件整体下移 _SHIFT 像素。
+        **必须在其它布局调整之前调用**——那几条是按当前坐标算位置的，
+        先移动再让位会把方框/按钮摆到错地方。
+        """
+        lab = getattr(self, 'unit_type_label', None)
+        combo = getattr(self, 'unit_type_combo', None)
+        anchor = getattr(self, 'label_10', None)          # 「案本号：」标签
+        if lab is None or combo is None or anchor is None:
+            return
+
+        _SHIFT = 26                                       # 让位高度
+        new_y = anchor.y() + 28                           # 紧接案本号那一行
+
+        # 先让位（案本号那一行本身和 搜索 按钮不动）
+        for c in self.children():
+            if not isinstance(c, QWidget) or c is self or c in (lab, combo):
+                continue
+            g = c.geometry()
+            if g.x() < 478 and g.y() > anchor.y():
+                c.move(g.x(), g.y() + _SHIFT)
+
+        lab.move(anchor.x(), new_y)                       # 与「案本号：」上下对齐
+        combo.move(80, new_y - 2)                         # 左缘对齐案本号输入框
+        combo.resize(360, combo.height())                 # 拉长占满一行
+
+    def _compact_identity_row(self):
+        """把「身份」并进「电话 / 岗位」那一行，并收掉空出来的整行。
+
+        身份原独占一整行（在电话/岗位行下方约 23px 处）。并过来后一行放三个
+        字段，所以电话、岗位两个输入框都要缩窄才排得下（标签槽是固定的，
+        见 _ROLE_IDENTITY_LABEL 的说明）。
+
+        与 _move_unit_type_row 一样会移动控件，必须排在按当前坐标算位置的
+        那几条（方框/按钮/单选）之前。
+        """
+        phone = getattr(self, 'lineEdit_4', None)       # 电话输入
+        post_lab = getattr(self, 'label_13', None)      # 「岗位：」
+        post = getattr(self, 'lineEdit_5', None)        # 岗位输入
+        ilab = getattr(self, 'identity_label', None)
+        iedit = getattr(self, 'identity_edit', None)
+        if any(x is None for x in (phone, post_lab, post, ilab, iedit)):
+            return
+
+        # 以「电话」那一对为准对齐（三对原本差 1px）
+        row_lab_y = getattr(self, 'label_5').y()
+        row_in_y = phone.y()
+        old_gap = iedit.y() - post.y()                  # 原来两行的间距
+
+        # 先收掉空出来的那一行：其下的左栏控件整体上移。
+        # 身份那两个自己单独摆，不参与这次上移。
+        for c in self.children():
+            if not isinstance(c, QWidget) or c is self or c in (ilab, iedit):
+                continue
+            g = c.geometry()
+            if g.x() < 478 and g.y() >= iedit.y():
+                c.move(g.x(), g.y() - old_gap)
+
+        # 三个字段并排：电话 │ 岗位 │ 身份
+        phone.resize(96, phone.height())
+        post_lab.move(186, row_lab_y)
+        post.resize(70, post.height())
+        post.move(252, row_in_y)
+        ilab.setText(_ROLE_IDENTITY_LABEL.get(self.get_current_role_type(), "身份："))
+        ilab.setGeometry(334, row_lab_y, 44, ilab.height())
+        iedit.setGeometry(384, row_in_y, 57, iedit.height())
+
+    def _move_time_fields_up(self):
+        """把四个时间字段移到「拟用条例」下方，中间那几行整体下移让位。
+
+        原先它们孤零零挂在左栏最底部（按钮行之下），和「拟用条例」这类案件
+        属性离得很远。移后顺序：拟用条例 → 申请/受理 → 受伤/就诊 → 身份证导入…
+        """
+        pairs = [(getattr(self, 'lbl_apply', None), getattr(self, 'apply_time_edit', None)),
+                 (getattr(self, 'lbl_accept', None), getattr(self, 'accept_time_edit', None)),
+                 (getattr(self, 'lbl_injury', None), getattr(self, 'injury_time_edit', None)),
+                 (getattr(self, 'lbl_visit', None), getattr(self, 'visit_time_edit', None))]
+        anchor = getattr(self, 'comboBox', None)          # 拟用条例
+        if anchor is None or any(l is None or e is None for l, e in pairs):
+            return
+
+        block = [x for pair in pairs for x in pair]
+        rows = [e.geometry() for _, e in pairs]
+        block_top = min(r.y() for r in rows)
+        block_bottom = max(r.y() + r.height() for r in rows)
+        block_h = block_bottom - block_top
+
+        a = anchor.geometry()
+        gap = 4
+        new_top = a.y() + a.height() + gap
+        shift = block_h + gap                             # 中间那几行的下移量
+
+        # 中间那几行让位（时间字段自己不算）
+        for c in self.children():
+            if not isinstance(c, QWidget) or c is self:
+                continue
+            if any(c is x for x in block):
+                continue
+            g = c.geometry()
+            if g.x() < 478 and new_top <= g.y() <= block_bottom:
+                c.move(g.x(), g.y() + shift)
+
+        delta = new_top - block_top                       # 时间块上移（负值）
+        for x in block:
+            x.move(x.x(), x.y() + delta)
+
+    def _compact_doc_buttons(self):
+        """底部那行：把「谈话通知书」「工伤告知书」挪到「案件审批表」之后。
+
+        原先两者被 105px 的空档推到右边（与它们彼此之间 19px 的间距不一致），
+        看着像分成了两组。这里沿用本行已有的 19px 间距，三个按钮并成一组。
+        """
+        first = getattr(self, 'pushButton_11', None)    # 案件审批表
+        second = getattr(self, 'pushButton_12', None)   # 谈话通知书
+        third = getattr(self, 'pushButton_7', None)     # 工伤告知书
+        if any(b is None for b in (first, second, third)):
+            return
+
+        gap = third.x() - (second.x() + second.width())  # 本行现成的间距，不写死
+        x = first.x() + first.width() + gap
+        second.move(x, first.y())
+        third.move(x + second.width() + gap, first.y())
+
+    def _align_role_radios(self):
+        """把「家属」抬到与本人/证人/法人同一行，四个角色排成一行。
+
+        原先家属独占第二行、还缩进在最左，看着参差。右侧空间随「谈话笔录」
+        下移而空出，正好接在法人之后（沿用同样的 75px 间距）。
+        """
+        names = ('radioButton', 'radioButton_2', 'radioButton_3', 'radioButton_4')
+        radios = [getattr(self, n, None) for n in names]
+        if any(r is None for r in radios):
+            return
+
+        pitch = radios[1].x() - radios[0].x()             # 现成的间距，不写死
+        radios[3].move(radios[2].x() + pitch, radios[0].y())
 
     # ========================================================================
     # 待办事项看板：文书送达流程（个人申请工伤案）
@@ -2580,14 +2794,11 @@ class MainWindow(QWidget, Ui_Form):
         role = self.get_current_role_type()
         print(f"🔄 角色切换: {role}")
         # 共享“身份”输入行的标签/提示随角色变化（家属这一栏填的是与死者关系）
+        # 标签槽是固定宽度（_compact_identity_row 摆的），所以不再按文本长度调宽度，
+        # 否则切到长标签的角色会把左边的岗位输入框压住。
         if hasattr(self, 'identity_label'):
-            text = _ROLE_IDENTITY_LABEL.get(role, _ROLE_IDENTITY_LABEL["本人"])
-            self.identity_label.setText(text)
-            # 文本变长（如「与死者关系：」）时左移加宽，右缘与输入框保持 6px 间距
-            right = self.identity_edit.x() - 6
-            w = max(78, self.identity_label.fontMetrics().horizontalAdvance(text) + 2)
-            self.identity_label.setGeometry(right - w, self.identity_label.y(), w,
-                                            self.identity_label.height())
+            self.identity_label.setText(
+                _ROLE_IDENTITY_LABEL.get(role, _ROLE_IDENTITY_LABEL["本人"]))
         if hasattr(self, 'identity_edit'):
             self.identity_edit.setToolTip(_ROLE_IDENTITY_HINT.get(role, ""))
             # 家属这一栏无通用默认值，清掉占位符「职工」避免误读
@@ -3357,44 +3568,44 @@ class MainWindow(QWidget, Ui_Form):
         # ============================================================
         # 7. 左栏：申请 / 受理 / 就诊 时间
         # ============================================================
-        DATE_H = 132
-        self.date_group = QGroupBox("申请 / 受理 / 受伤 / 就诊时间", self)
-        self.date_group.setGeometry(70, 655, 390, DATE_H)
-        self.date_group.setFont(QFont("微软雅黑", 9))
+        # 四个字段两两并排：申请｜受理 一行，受伤｜就诊 一行（原为四行）。
+        # 不再套 GroupBox（原先外面有个「申请/受理/受伤/就诊时间」的框），
+        # 四个字段直接挂在主窗口上，坐标与表单其它行对齐（标签 x=11，右缘 441）。
+        _LBL_W, _IN_W = 60, 142          # 标签 5 字固定 60；两列输入框平分余宽
+        _C1_LBL, _C1_IN = 11, 77         # 左列
+        _C2_LBL, _C2_IN = 233, 299       # 右列
+        _ROW1_LBL, _ROW1_IN = 685, 683   # 第一行
+        _ROW2_LBL, _ROW2_IN = 711, 709   # 第二行
 
-        lbl_apply = QLabel("申请时间：", self.date_group)
-        lbl_apply.setGeometry(8, 30, 60, 20)
+        self.lbl_apply = QLabel("申请时间：", self)
+        self.lbl_apply.setGeometry(_C1_LBL, _ROW1_LBL, _LBL_W, 20)
 
-        self.apply_time_edit = QLineEdit(self.date_group)
-        self.apply_time_edit.setGeometry(68, 28, 300, 22)
-        self.apply_time_edit.setPlaceholderText("留空=当前")
+        self.apply_time_edit = QLineEdit(self)
+        self.apply_time_edit.setGeometry(_C1_IN, _ROW1_IN, _IN_W, 22)
         self.apply_time_edit.setToolTip("输入8位日期如20260816；留空则使用系统当前日期")
         self.apply_time_edit.editingFinished.connect(self._save_date_inputs)
 
-        lbl_accept = QLabel("受理时间：", self.date_group)
-        lbl_accept.setGeometry(8, 56, 60, 20)
+        self.lbl_accept = QLabel("受理时间：", self)
+        self.lbl_accept.setGeometry(_C2_LBL, _ROW1_LBL, _LBL_W, 20)
 
-        self.accept_time_edit = QLineEdit(self.date_group)
-        self.accept_time_edit.setGeometry(68, 54, 300, 22)
-        self.accept_time_edit.setPlaceholderText("留空=当前")
+        self.accept_time_edit = QLineEdit(self)
+        self.accept_time_edit.setGeometry(_C2_IN, _ROW1_IN, _IN_W, 22)
         self.accept_time_edit.setToolTip("输入8位日期如20260816；留空则使用系统当前日期")
         self.accept_time_edit.editingFinished.connect(self._save_date_inputs)
 
-        lbl_injury = QLabel("受伤时间：", self.date_group)
-        lbl_injury.setGeometry(8, 82, 60, 20)
+        self.lbl_injury = QLabel("受伤时间：", self)
+        self.lbl_injury.setGeometry(_C1_LBL, _ROW2_LBL, _LBL_W, 20)
 
-        self.injury_time_edit = QLineEdit(self.date_group)
-        self.injury_time_edit.setGeometry(68, 80, 300, 22)
-        self.injury_time_edit.setPlaceholderText("12位如202609051105")
+        self.injury_time_edit = QLineEdit(self)
+        self.injury_time_edit.setGeometry(_C1_IN, _ROW2_IN, _IN_W, 22)
         self.injury_time_edit.setToolTip("年月日时分，如 202609051105；留空则不填")
         self.injury_time_edit.editingFinished.connect(self._save_date_inputs)
 
-        lbl_visit = QLabel("就诊时间：", self.date_group)
-        lbl_visit.setGeometry(8, 108, 60, 20)
+        self.lbl_visit = QLabel("就诊时间：", self)
+        self.lbl_visit.setGeometry(_C2_LBL, _ROW2_LBL, _LBL_W, 20)
 
-        self.visit_time_edit = QLineEdit(self.date_group)
-        self.visit_time_edit.setGeometry(68, 106, 300, 22)
-        self.visit_time_edit.setPlaceholderText("12位如202609051105")
+        self.visit_time_edit = QLineEdit(self)
+        self.visit_time_edit.setGeometry(_C2_IN, _ROW2_IN, _IN_W, 22)
         self.visit_time_edit.setToolTip("年月日时分，如 202609051105；留空则不填")
         self.visit_time_edit.editingFinished.connect(self._save_date_inputs)
 
@@ -4485,7 +4696,7 @@ class MainWindow(QWidget, Ui_Form):
                 if (gender == "男" and age > 60) or (gender == "女" and age > 50):
                     self._set_status('此人已经超龄', 'red', 'label_12')
                 else:
-                    self._set_status('信息提示', 'black', 'label_12')
+                    self._set_status('', 'black', 'label_12')   # 常态留空，不写占位文字
 
         except Exception as e:
             print(f"[calculate_age_from_id] 错误: {e}")
@@ -4608,8 +4819,10 @@ class MainWindow(QWidget, Ui_Form):
         if hasattr(self, 'material_list'):
             self.material_list.clear()
 
-        self._set_status('信息提示', 'black', 'label_14')
-        self._set_status('信息提示', 'black', 'label_12')
+        # 两处提示位都清空：方框常态就是空的，不该写占位文字
+        # （左上角已有静态的「信息提示：」标签，再写一遍会重复）
+        self._set_status('', 'black', 'label_14')
+        self._set_status('', 'black', 'label_12')
     def _read_all_transcripts(self, case_folder: str) -> str:
         """读取案件目录下所有谈话笔录（本人/证人/法人）全文，按文件名分隔"""
         try:
