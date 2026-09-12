@@ -7,8 +7,11 @@
 - 文件缺失时自动用 DEFAULT_PROMPTS 重建一份；文件为空时回退到默认，不覆盖用户文件。
 - 动态数据用 {{...}} 标记（如 {{笔录全文}}），加载时用 str.replace 替换，用户写单花括号 JSON 示例不受影响。
 """
+import logging
 import os
 from typing import Dict
+
+logger = logging.getLogger(__name__)
 
 # 动态标记在文件里用 {{xx}} 表示，加载时按各调用方替换。
 DEFAULT_PROMPTS: Dict[str, str] = {
@@ -406,18 +409,18 @@ def load_prompt(key: str) -> str:
                 f.write(default)
             print(f"📝 已生成提示词文件: {path}")
         except Exception as e:
-            print(f"⚠️ 生成提示词文件失败({path}): {e}")
+            logger.warning(f"⚠️ 生成提示词文件失败({path}): {e}")
         return default
 
     try:
         with open(path, "r", encoding="utf-8-sig") as f:
             content = f.read().strip()
     except Exception as e:
-        print(f"⚠️ 读取提示词文件失败({path})，使用默认: {e}")
+        logger.warning(f"⚠️ 读取提示词文件失败({path})，使用默认: {e}")
         return default
 
     if not content:
-        print(f"⚠️ 提示词文件为空({path})，使用默认")
+        logger.warning(f"⚠️ 提示词文件为空({path})，使用默认")
         return default
 
     return content

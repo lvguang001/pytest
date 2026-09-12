@@ -19,18 +19,20 @@ from PyQt5.QtWidgets import (
     QGroupBox
 )
 from PyQt5.QtGui import QFont
-
 from ui_main_window import Ui_Form
 from services import FileService, DataService, TemplateVariableManager
 from ai_service import AIService
 from case_classifier import CaseClassifier
 from config_service import ConfigService
 from path_utils import path_utils
+import log_utils
 from main import UserManager, PasswordLineEdit
 from service_flow import (derive, initial_sf, confirm_delivery, revert_to_ask,
                           delivered_again, finish_flow, DOC_LABEL, today_iso)
 from todo_board import (TodoBoard, DeliveryConfirmDialog, PostalTrackingDialog,
                         DecisionConfirmDialog)
+
+logger = logging.getLogger(__name__)
 
 # 设置日志级别
 logging.getLogger('config_service').setLevel(logging.WARNING)
@@ -238,7 +240,7 @@ def render_prompt_template(template: str, data: Dict[str, Any], label: str = '')
             template = template.replace('{{%s}}' % key, str(val))
     leftovers = sorted(set(re.findall(r'\{\{([^}]*)\}\}', template)))
     if leftovers:
-        print(f"⚠️ 提示词「{label}」仍有未替换占位符: {leftovers}")
+        logger.warning(f"⚠️ 提示词「{label}」仍有未替换占位符: {leftovers}")
     return template
 
 
@@ -1191,7 +1193,7 @@ class MainWindow(QWidget, Ui_Form):
             print(f"✅ 谈话模板路径: {self.TALK_TEMPLATE_PATH}")
             print(f"✅ 文书模板路径: {self.DOCUMENT_TEMPLATE_PATH}")
         else:
-            print(f"❌ 模板路径不存在: {self.TEMPLATE_PATH}")
+            logger.error(f"❌ 模板路径不存在: {self.TEMPLATE_PATH}")
 
         self._setup_unit_identity_ui()  # 单位性质下拉 + 共享“身份”输入行（含其下控件下移）
 
@@ -1509,7 +1511,7 @@ class MainWindow(QWidget, Ui_Form):
                 return {cid: migrate_case(unpack_case(blk))
                         for cid, blk in data['cases'].items()}
         except Exception as e:
-            print(f"⚠️ 加载案件数据失败: {e}")
+            logger.warning(f"⚠️ 加载案件数据失败: {e}")
         return {}
 
     def _backup_cases_data(self, path: str) -> None:
@@ -1520,7 +1522,7 @@ class MainWindow(QWidget, Ui_Form):
                 shutil.copy2(path, bak)
                 print(f"📦 升级前已备份原案件数据: {bak}")
             except Exception as e:
-                print(f"⚠️ 备份案件数据失败（继续）: {e}")
+                logger.warning(f"⚠️ 备份案件数据失败（继续）: {e}")
 
     def _save_cases_data(self, cases: Dict[str, Any]) -> bool:
         """保存全部案件数据到 cases_data.json（内存 flat → 磁盘分块 v3）"""
@@ -1534,7 +1536,7 @@ class MainWindow(QWidget, Ui_Form):
             print(f"✅ 案件数据已保存: {path}（共 {len(cases)} 个案件）")
             return True
         except Exception as e:
-            print(f"❌ 保存案件数据失败: {e}")
+            logger.error(f"❌ 保存案件数据失败: {e}")
             return False
 
     def _update_case_field(self, case_number: str, **fields) -> bool:
@@ -1548,7 +1550,7 @@ class MainWindow(QWidget, Ui_Form):
             self._save_cases_data(cases)
             return True
         except Exception as e:
-            print(f"⚠️ 更新案件字段失败（非致命）: {e}")
+            logger.warning(f"⚠️ 更新案件字段失败（非致命）: {e}")
             return False
 
     def _update_case_in_data(self, case_number: str, person_name: str,
@@ -1577,7 +1579,7 @@ class MainWindow(QWidget, Ui_Form):
             self._save_cases_data(cases)
             return True
         except Exception as e:
-            print(f"⚠️ 更新工亡案件数据失败: {e}")
+            logger.warning(f"⚠️ 更新工亡案件数据失败: {e}")
             return False
 
     # ========================================================================
@@ -1832,7 +1834,7 @@ class MainWindow(QWidget, Ui_Form):
         try:
             self._apply_case_object(cobj)
         except Exception as e:
-            print(f"⚠️ 决定书装载案件到主界面失败: {e}")
+            logger.warning(f"⚠️ 决定书装载案件到主界面失败: {e}")
         self.lineEdit_2.setText(case_id)
         QTimer.singleShot(0, self.approve)  # 等同点击“案件审批表”按钮
 
@@ -2140,12 +2142,12 @@ class MainWindow(QWidget, Ui_Form):
     def _on_transcript_generated(self, role: str, case_id: str, case_obj: dict, result: dict):
         if result.get("状态") != "成功":
             err = result.get("错误信息", "未知错误")
-            print(f"⚠️ {role}谈话笔录生成失败: {err}")
+            logger.warning(f"⚠️ {role}谈话笔录生成失败: {err}")
             self._set_status(f'{role}谈话笔录生成失败: {err[:40]}', 'orange')
             return
         content = (result.get("内容", "") or "").strip()
         if not content:
-            print(f"⚠️ {role}谈话笔录生成失败：AI 返回内容为空")
+            logger.warning(f"⚠️ {role}谈话笔录生成失败：AI 返回内容为空")
             self._set_status(f'{role}谈话笔录生成失败：AI 返回内容为空', 'orange')
             return
         path = self._save_transcript_to_template(case_obj, content, role)
@@ -2162,7 +2164,7 @@ class MainWindow(QWidget, Ui_Form):
             self._set_status(f'{role}谈话笔录已生成，打开失败: {message}', 'orange')
 
     def _on_transcript_error(self, err: str):
-        print(f"❌ 询问笔录生成出错: {err}")
+        logger.error(f"❌ 询问笔录生成出错: {err}")
         self._set_status('询问笔录生成出错', 'red')
 
     def _save_transcript_to_template(self, case_obj: dict, content: str, role: str = '本人') -> str:
@@ -2176,7 +2178,7 @@ class MainWindow(QWidget, Ui_Form):
             # ── 1. 渲染谈话模板（替换占位符）──
             template_path = str(path_utils.get_talk_template_path(meta['talk_template']))
             if not os.path.exists(template_path):
-                print(f"⚠️ 谈话模板不存在: {template_path}")
+                logger.warning(f"⚠️ 谈话模板不存在: {template_path}")
                 return ""
 
             template_data = getattr(self, meta['docx_data'])(case_obj)
@@ -2196,7 +2198,7 @@ class MainWindow(QWidget, Ui_Form):
                     break
 
             if anchor_index is None:
-                print("⚠️ 未找到锚点「答：听清楚了，不申请回避」")
+                logger.warning("⚠️ 未找到锚点「答：听清楚了，不申请回避」")
                 return ""
 
             # ── 3. 删除锚点之后的模板样例问答（保留头部+告知，避免与AI问答重复）──
@@ -2243,7 +2245,7 @@ class MainWindow(QWidget, Ui_Form):
             print(f"✅ {label}已生成: {target_path}")
             return target_path
         except Exception as e:
-            print(f"❌ 生成{role}谈话笔录失败: {e}")
+            logger.error(f"❌ 生成{role}谈话笔录失败: {e}")
             import traceback
             traceback.print_exc()
             self._set_status(f'生成{role}谈话笔录失败', 'red')
@@ -2671,7 +2673,7 @@ class MainWindow(QWidget, Ui_Form):
                 QMessageBox.critical(dialog, "失败", f"插入失败：{message}")
 
         except Exception as e:
-            print(f"❌ 插入问题失败: {e}")
+            logger.error(f"❌ 插入问题失败: {e}")
             import traceback
             traceback.print_exc()
             QMessageBox.critical(dialog, "错误", f"插入过程中发生错误：{str(e)}")
@@ -2731,7 +2733,7 @@ class MainWindow(QWidget, Ui_Form):
             return True, "插入成功"
 
         except Exception as e:
-            print(f"❌ 插入问题到文档失败: {e}")
+            logger.error(f"❌ 插入问题到文档失败: {e}")
             import traceback
             traceback.print_exc()
             return False, str(e)
@@ -2875,9 +2877,9 @@ class MainWindow(QWidget, Ui_Form):
                                         print(f"  提取 {data_field}: {right_text}")
                                     else:
                                         # 右边单元格是空的，标记为红色
-                                        print(f"  ⚠️ {data_field}: 右边单元格为空")
+                                        logger.warning(f"  ⚠️ {data_field}: 右边单元格为空")
                                 else:
-                                    print(f"  ⚠️ {data_field}: 没有右侧单元格")
+                                    logger.warning(f"  ⚠️ {data_field}: 没有右侧单元格")
 
             print("\n📋 提取结果:")
             required_fields = ['用人单位', '职工姓名', '职工身份证号', '申请时间', '受理时间', '受伤经过', '医疗证明']
@@ -2886,7 +2888,7 @@ class MainWindow(QWidget, Ui_Form):
                 if field in extracted_data:
                     print(f"  ✅ {field}: {extracted_data[field]}")
                 else:
-                    print(f"  ❌ {field}: 未找到")
+                    logger.error(f"  ❌ {field}: 未找到")
 
             # 填充缺失字段
             current_date = _date_now()
@@ -2916,7 +2918,7 @@ class MainWindow(QWidget, Ui_Form):
             return extracted_data
 
         except Exception as e:
-            print(f"❌ 提取审批表数据失败: {e}")
+            logger.error(f"❌ 提取审批表数据失败: {e}")
             import traceback
             traceback.print_exc()
 
@@ -2964,7 +2966,7 @@ class MainWindow(QWidget, Ui_Form):
 
                 # 使用找到的第一个审批表文件
                 approval_file_path = os.path.join(self.current_case_folder, approval_files[0])
-                print(f"⚠️ 使用替代审批表: {approval_files[0]}")
+                logger.warning(f"⚠️ 使用替代审批表: {approval_files[0]}")
 
             print(f"✅ 找到审批表文件: {approval_file_path}")
 
@@ -3085,13 +3087,13 @@ class MainWindow(QWidget, Ui_Form):
                     self._set_status(f'谈话通知书生成成功，但打开失败: {message}', 'orange')
 
             except Exception as e:
-                print(f"❌ 生成谈话通知书失败: {e}")
+                logger.error(f"❌ 生成谈话通知书失败: {e}")
                 import traceback
                 traceback.print_exc()
                 self._set_status(f'生成谈话通知书失败: {str(e)}', 'red')
 
         except Exception as e:
-            print(f"❌ 谈话通知书过程异常: {e}")
+            logger.error(f"❌ 谈话通知书过程异常: {e}")
             import traceback
             traceback.print_exc()
             self._set_status(f'生成谈话通知书异常: {str(e)}', 'red')
@@ -3135,7 +3137,7 @@ class MainWindow(QWidget, Ui_Form):
 
         # 添加简单的防重复
         if hasattr(self, '_is_handling_ai_result') and self._is_handling_ai_result:
-            print("⚠️ 已经在处理AI结果，跳过重复调用")
+            logger.warning("⚠️ 已经在处理AI结果，跳过重复调用")
             return
 
         self._is_handling_ai_result = True
@@ -3149,7 +3151,7 @@ class MainWindow(QWidget, Ui_Form):
                 return
 
             if error:
-                print(f"❌ AI操作出错: {error}")
+                logger.error(f"❌ AI操作出错: {error}")
                 QMessageBox.critical(self, "AI审查错误", f"操作失败: {error}")
                 return
 
@@ -3157,7 +3159,7 @@ class MainWindow(QWidget, Ui_Form):
                 print("✅ AI操作成功，显示结果")
                 self.show_ai_review_result(result)
         except Exception as e:
-            print(f"❌ 处理AI结果时出错: {e}")
+            logger.error(f"❌ 处理AI结果时出错: {e}")
             import traceback
             traceback.print_exc()
         finally:
@@ -3489,7 +3491,7 @@ class MainWindow(QWidget, Ui_Form):
                 service="DeepSeek",
             )
         except Exception as e:
-            print(f"⚠️ 自动保存失败: {e}")
+            logger.warning(f"⚠️ 自动保存失败: {e}")
             return
         if self.api_user_combo.findText(username) < 0:
             self.api_user_combo.addItem(username)
@@ -3517,7 +3519,7 @@ class MainWindow(QWidget, Ui_Form):
             # 从UserManager获取当前用户的API配置
             username = self._get_current_username()
             if not username:
-                print("⚠️ 未找到用户配置，AI功能将不可用")
+                logger.warning("⚠️ 未找到用户配置，AI功能将不可用")
                 self.ai_service = None
                 self._update_api_status()
                 return
@@ -3528,7 +3530,7 @@ class MainWindow(QWidget, Ui_Form):
 
             # 检查配置是否完整
             if not api_key or not api_url:
-                print("⚠️ API配置不完整，AI功能将不可用")
+                logger.warning("⚠️ API配置不完整，AI功能将不可用")
                 print(f"  API地址: {api_url if api_url else '未设置'}")
                 print(f"  API密钥: {'已设置' if api_key else '未设置'}")
                 self.ai_service = None
@@ -3545,7 +3547,7 @@ class MainWindow(QWidget, Ui_Form):
             self._update_api_status()
 
         except Exception as e:
-            print(f"❌ AI服务初始化失败: {e}")
+            logger.error(f"❌ AI服务初始化失败: {e}")
             import traceback
             traceback.print_exc()
             self.ai_service = None
@@ -3577,7 +3579,7 @@ class MainWindow(QWidget, Ui_Form):
 
             # 检查AI服务
             if not self.ai_service:
-                print("❌ AI服务未初始化")
+                logger.error("❌ AI服务未初始化")
                 QMessageBox.warning(self, "AI审查", "请先配置API密钥。")
                 self.init_ai_service()
                 return
@@ -3586,7 +3588,7 @@ class MainWindow(QWidget, Ui_Form):
 
             # 检查案件文件夹
             if not self.current_case_folder:
-                print("❌ 当前案件文件夹为空")
+                logger.error("❌ 当前案件文件夹为空")
                 QMessageBox.warning(self, "AI审查", "请先保存案件信息。")
                 return
 
@@ -3595,7 +3597,7 @@ class MainWindow(QWidget, Ui_Form):
             # 查找主询问对象笔录（工亡案=家属，普通案=本人）
             person_files = self._main_transcript_candidates()
             if not person_files:
-                print("❌ 未找到可审查的谈话笔录文件")
+                logger.error("❌ 未找到可审查的谈话笔录文件")
                 QMessageBox.warning(self, "AI审查", "未找到可审查的谈话笔录文件。")
                 return
 
@@ -3607,7 +3609,7 @@ class MainWindow(QWidget, Ui_Form):
 
             # 检查文件是否存在
             if not os.path.exists(file_path):
-                print(f"❌ 文件不存在")
+                logger.error(f"❌ 文件不存在")
                 QMessageBox.warning(self, "AI审查", f"文件不存在: {file_path}")
                 return
 
@@ -3916,7 +3918,7 @@ class MainWindow(QWidget, Ui_Form):
                                         f"工伤告知书已生成:\n{notice_file_name}\n\n但打开失败: {message}")
 
         except Exception as e:
-            print(f"❌ 生成工伤告知书失败: {e}")
+            logger.error(f"❌ 生成工伤告知书失败: {e}")
             import traceback
             traceback.print_exc()
             self._set_status(f'生成工伤告知书失败: {str(e)}', 'red')
@@ -3955,7 +3957,7 @@ class MainWindow(QWidget, Ui_Form):
 
             # 注意：窗口大小由 _setup_api_config_ui 固定为 870x740，此处不再覆盖
         except Exception as e:
-            print(f"⚠️ 应用UI设置失败: {e}")
+            logger.warning(f"⚠️ 应用UI设置失败: {e}")
 
     # ========================================================================
     # 统一"人记录"助手（表单 ↔ 英文 schema ↔ 中文兼容扁平键）
@@ -4241,9 +4243,16 @@ class MainWindow(QWidget, Ui_Form):
             print(f"保存证人信息失败: {e}")
 
     def setup_logging(self):
-        """简化日志系统"""
-        self.log_warning = lambda msg: print(f"警告: {msg}")
-        self.log_error = lambda msg: print(f"错误: {msg}")
+        """配置统一日志：轮转文件 + 控制台 + 全局异常兜底（幂等）。
+
+        日志落在 数据目录/logs/ 下（程序目录不可写时自动退回临时目录）。
+        """
+        base = getattr(self, 'DATA_PATH', '') or str(path_utils.get_data_path(""))
+        log_utils.setup_logging(os.path.join(base, "logs"))
+        log_utils.install_excepthook()
+        log_utils.install_qt_message_handler()
+        self.log_warning = lambda msg: logger.warning("%s", msg)
+        self.log_error = lambda msg: logger.error("%s", msg)
     def on_case_type_changed(self):
         """当案件类型选择改变时调用"""
         is_death_case = self.death_case_checkbox.isChecked()
@@ -4293,10 +4302,10 @@ class MainWindow(QWidget, Ui_Form):
                     if self.items_list:
                         print(f"   示例: {self.items_list[:3]}")
                 except Exception as e:
-                    print(f"❌ 读取用工单位文件失败: {e}")
+                    logger.error(f"❌ 读取用工单位文件失败: {e}")
                     self.items_list = ['公司A', '公司B', '公司C']  # 默认数据
             else:
-                print("⚠️ 用工单位文件不存在，创建默认文件")
+                logger.warning("⚠️ 用工单位文件不存在，创建默认文件")
                 self.items_list = ['公司A', '公司B', '公司C']
                 # 创建默认文件
                 try:
@@ -4304,7 +4313,7 @@ class MainWindow(QWidget, Ui_Form):
                     df.to_excel(company_file, index=False)
                     print(f"✅ 创建默认用工单位文件")
                 except Exception as e:
-                    print(f"❌ 创建用工单位文件失败: {e}")
+                    logger.error(f"❌ 创建用工单位文件失败: {e}")
 
             # 用人单位 - 使用文书模板目录
             employer_file = str(path_utils.get_document_template_path('用人单位汇总.xlsx'))
@@ -4316,17 +4325,17 @@ class MainWindow(QWidget, Ui_Form):
                     self.items_list1 = file1['用人单位汇总'].tolist()
                     print(f"✅ 加载用人单位: {len(self.items_list1)}个")
                 except Exception as e:
-                    print(f"❌ 读取用人单位文件失败: {e}")
+                    logger.error(f"❌ 读取用人单位文件失败: {e}")
                     self.items_list1 = ['用人单位A', '用人单位B']
             else:
-                print("⚠️ 用人单位文件不存在，创建默认文件")
+                logger.warning("⚠️ 用人单位文件不存在，创建默认文件")
                 self.items_list1 = ['用人单位A', '用人单位B']
                 try:
                     df = pd.DataFrame(self.items_list1, columns=['用人单位汇总'])
                     df.to_excel(employer_file, index=False)
                     print(f"✅ 创建默认用人单位文件")
                 except Exception as e:
-                    print(f"❌ 创建用人单位文件失败: {e}")
+                    logger.error(f"❌ 创建用人单位文件失败: {e}")
 
             # 工地名称 - 使用文书模板目录
             site_file = str(path_utils.get_document_template_path('工地名称汇总.xlsx'))
@@ -4338,20 +4347,20 @@ class MainWindow(QWidget, Ui_Form):
                     self.items_list2 = file2['工地名称汇总'].tolist()
                     print(f"✅ 加载工地名称: {len(self.items_list2)}个")
                 except Exception as e:
-                    print(f"❌ 读取工地名称文件失败: {e}")
+                    logger.error(f"❌ 读取工地名称文件失败: {e}")
                     self.items_list2 = ['工地A', '工地B']
             else:
-                print("⚠️ 工地名称文件不存在，创建默认文件")
+                logger.warning("⚠️ 工地名称文件不存在，创建默认文件")
                 self.items_list2 = ['工地A', '工地B']
                 try:
                     df = pd.DataFrame(self.items_list2, columns=['工地名称汇总'])
                     df.to_excel(site_file, index=False)
                     print(f"✅ 创建默认工地名称文件")
                 except Exception as e:
-                    print(f"❌ 创建工地名称文件失败: {e}")
+                    logger.error(f"❌ 创建工地名称文件失败: {e}")
 
         except Exception as e:
-            print(f"❌ 初始化组合框数据失败: {e}")
+            logger.error(f"❌ 初始化组合框数据失败: {e}")
             import traceback
             traceback.print_exc()
 
@@ -4431,7 +4440,7 @@ class MainWindow(QWidget, Ui_Form):
                 combobox.addItem(str(item))
             print(f"✅ 添加了 {len(items)} 个选项")
         else:
-            print("⚠️ 没有数据可添加")
+            logger.warning("⚠️ 没有数据可添加")
             combobox.addItem("暂无数据")
 
         combobox.setCurrentIndex(-1)  # 清空选择
@@ -4613,12 +4622,12 @@ class MainWindow(QWidget, Ui_Form):
                 except Exception:
                     continue
             if not parts:
-                print("⚠️ 目录下没有可用的谈话笔录")
+                logger.warning("⚠️ 目录下没有可用的谈话笔录")
                 return ""
             print(f"📚 读取全部笔录: {len(parts)} 份")
             return "\n\n".join(parts)
         except Exception as e:
-            print(f"⚠️ 读取全部笔录失败: {e}")
+            logger.warning(f"⚠️ 读取全部笔录失败: {e}")
             return ""
 
     def approve(self):
@@ -4866,7 +4875,7 @@ class MainWindow(QWidget, Ui_Form):
                 self._set_status(f'审批表已生成，打开失败: {message}', 'orange')
 
         except Exception as e:
-            print(f"❌ 生成审批表异常: {e}")
+            logger.error(f"❌ 生成审批表异常: {e}")
             import traceback
             traceback.print_exc()
             self._set_status(f'生成审批表失败: {str(e)}', 'red')
@@ -5114,7 +5123,7 @@ class MainWindow(QWidget, Ui_Form):
             print(f"✅ 工亡案件已保存: {case_number} 文件夹: {self.current_case_folder}")
 
         except Exception as e:
-            print(f"❌ 保存工亡信息失败: {e}")
+            logger.error(f"❌ 保存工亡信息失败: {e}")
             import traceback
             traceback.print_exc()
             self._set_status(f"保存失败: {e}", "red")

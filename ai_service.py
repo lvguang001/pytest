@@ -1,9 +1,13 @@
 # ai_service.py
+import json
+import logging
+
 import requests
 from docx import Document
-import json
 
 from prompt_manager import load_prompt
+
+logger = logging.getLogger(__name__)
 
 
 class AIService:
@@ -29,7 +33,7 @@ class AIService:
             return result
 
         except Exception as e:
-            print(f"❌ 提取文本失败: {str(e)}")
+            logger.error(f"❌ 提取文本失败: {str(e)}")
             raise Exception(f"读取Word文档失败: {e}")
 
     def analyze_legal_document(self, document_text: str) -> dict:
@@ -84,8 +88,8 @@ class AIService:
                     "原始回复": ai_response
                 }
             else:
-                print(f"❌ API错误: {response.status_code}")
-                print(f"❌ 错误详情: {response.text}")
+                logger.error(f"❌ API错误: {response.status_code}")
+                logger.error(f"❌ 错误详情: {response.text}")
                 return {
                     "审查状态": "失败",
                     "错误信息": f"API调用失败: {response.status_code} - {response.text[:200]}"
@@ -98,7 +102,7 @@ class AIService:
                 "错误信息": "API请求超时，请检查网络连接"
             }
         except Exception as e:
-            print(f"❌ 请求异常: {str(e)}")
+            logger.error(f"❌ 请求异常: {str(e)}")
             return {
                 "审查状态": "异常",
                 "错误信息": f"请求异常: {str(e)}"
@@ -207,11 +211,11 @@ class AIService:
                 print(f"✅ 生成完成：调查核实情况 {len(injury)}字，诊断结论「{conclusion}」")
                 return {"受伤经过": injury, "诊断结论": conclusion}
             else:
-                print(f"❌ 生成失败，状态码: {response.status_code}")
+                logger.error(f"❌ 生成失败，状态码: {response.status_code}")
                 return None
 
         except Exception as e:
-            print(f"❌ 生成失败: {e}")
+            logger.error(f"❌ 生成失败: {e}")
             return None
 
     def analyze_approval_transcripts(self, transcripts_text: str,
@@ -266,14 +270,14 @@ class AIService:
                     return parsed
                 return None
             else:
-                print(f"❌ 审批表分析失败，状态码: {response.status_code}")
+                logger.error(f"❌ 审批表分析失败，状态码: {response.status_code}")
                 return None
 
         except requests.exceptions.Timeout:
             print("⏰ 审批表分析请求超时")
             return None
         except Exception as e:
-            print(f"❌ 审批表分析异常: {e}")
+            logger.error(f"❌ 审批表分析异常: {e}")
             return None
 
     def generate_transcript(self, system_prompt: str, user_prompt: str) -> dict:
@@ -350,7 +354,7 @@ class AIService:
                 }
             else:
                 error_msg = f"API 返回错误 {response.status_code}: {response.text[:300]}"
-                print(f"❌ {error_msg}")
+                logger.error(f"❌ {error_msg}")
                 return {
                     "状态": "失败",
                     "内容": "",
@@ -365,7 +369,7 @@ class AIService:
                 "错误信息": "API请求超时，请检查网络连接后重试"
             }
         except Exception as e:
-            print(f"❌ 请求异常: {str(e)}")
+            logger.error(f"❌ 请求异常: {str(e)}")
             return {
                 "状态": "异常",
                 "内容": "",
@@ -461,7 +465,7 @@ class AIService:
             if isinstance(data, dict):
                 return data
         except Exception as e:
-            print(f"⚠️ JSON 解析失败，尝试正则提取: {e}")
+            logger.warning(f"⚠️ JSON 解析失败，尝试正则提取: {e}")
             import re
             m = re.search(r"\{.*\}", text, re.S)
             if m:
