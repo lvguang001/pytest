@@ -51,7 +51,6 @@ class UserManager:
 
     def __init__(self):
         self.users_file = str(path_utils.get_users_file())
-        self.current_user = None
         self.users_data = self._load_users()
         print(f"[INFO] UserManager使用文件: {self.users_file}")
 
@@ -123,15 +122,6 @@ class UserManager:
     def get_user_list(self) -> list:
         """获取所有用户名列表"""
         return list(self.users_data.get("users", {}).keys())
-
-    def get_current_user(self) -> Optional[str]:
-        """获取当前用户"""
-        return self.current_user
-
-    def set_current_user(self, username: str):
-        """设置当前用户"""
-        self.current_user = username
-
 
 # ============================================================================
 # PasswordLineEdit（带眼睛按钮的密码输入框）

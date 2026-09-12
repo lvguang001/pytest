@@ -85,25 +85,6 @@ class FileService:
         self.WPS_PATH = self.find_wps_path()
         self.logger.setLevel(logging.WARNING)
 
-    def create_enhanced_case_folder(self, base_path: str, case_info: Dict[str, Any]) -> str:
-        """创建案件文件夹 —— 直接用案本号命名"""
-        import os
-
-        case_number = case_info['case_number']
-
-        folder_name = case_number
-        folder_path = os.path.join(base_path, folder_name)
-
-        # 处理重复
-        counter = 1
-        while os.path.exists(folder_path):
-            folder_name = f"{case_number}-{counter:02d}"
-            folder_path = os.path.join(base_path, folder_name)
-            counter += 1
-
-        os.makedirs(folder_path, exist_ok=True)
-        return folder_path
-
     def _create_default_logger(self):
         """创建默认日志器"""
         import logging

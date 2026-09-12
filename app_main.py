@@ -726,17 +726,6 @@ class CaseDataModel:
 
         self.basic_info.update(prefixed_data)
 
-    def update_company_info(self, company_name: str = "",
-                            employer: str = "",
-                            site: str = ""):
-        """更新公司信息"""
-        if company_name:
-            self.company_info['用工单位'] = company_name
-        if employer:
-            self.company_info['用人单位'] = employer
-        if site:
-            self.company_info['工地名称'] = site
-
     def clear_role_data(self, role: str):
         """清除特定角色的数据"""
         role_prefix = role if role in ["本人", "证人", "法人", "家属"] else ""
@@ -755,23 +744,6 @@ class CaseDataModel:
 # ============================================================================
 # 关键证据定义（缺失时AI必须在笔录中追问）
 # ============================================================================
-KEY_EVIDENCE_NAMES = [
-    "身份证",           # 身份证明
-    "劳动合同",         # 劳动关系证明
-    "医院诊断证明",     # 受伤事实证明
-    "工资发放记录",     # 工资标准证明
-    "考勤记录",         # 工作时间证明
-    "证人证言",         # 事故见证
-    "事故现场照片",     # 现场证据
-    "监控录像",         # 现场证据
-    "工伤认定书",       # 前置认定
-    "劳动关系裁决书",   # 劳动关系确认
-    "道路交通事故认定书",  # 上下班途中/因工外出
-    "公安报案回执",     # 暴力伤害
-    "死亡证明",         # 工亡
-]
-
-
 class MaterialListWidget(QWidget):
     """替代原有 QTextEdit 的材料管理组件。
 
@@ -898,21 +870,6 @@ class MaterialListWidget(QWidget):
                 "notes": row["_note"].text(),
             })
         return result
-
-    def get_provided(self) -> List[str]:
-        """获取已提供的材料名称列表"""
-        return [r["_name_edit"].text() for r in self._rows if r["_cb"].isChecked()]
-
-    def get_missing(self) -> List[str]:
-        """获取缺失的材料名称列表"""
-        return [r["_name_edit"].text() for r in self._rows if not r["_cb"].isChecked()]
-
-    def get_missing_key_evidence(self) -> List[str]:
-        """获取缺失的关键证据列表"""
-        missing = self.get_missing()
-        return [m for m in missing if any(
-            kw in m for kw in KEY_EVIDENCE_NAMES
-        )]
 
     def clear(self):
         """清空所有行"""
@@ -1632,35 +1589,6 @@ class MainWindow(QWidget, Ui_Form):
             return True
         except Exception as e:
             logger.warning(f"⚠️ 更新案件字段失败（非致命）: {e}")
-            return False
-
-    def _update_case_in_data(self, case_number: str, person_name: str,
-                             folder_path: str, transcript_file: str) -> bool:
-        """工亡基本信息入口：把案件条目写入 cases_data.json（不存在则建档，存在则补目录/文书字段）"""
-        try:
-            cases = self._load_cases_data()
-            case_obj = cases.get(case_number)
-            is_personal = self.personal_application_checkbox.isChecked()
-            if case_obj is None:
-                case_obj = {
-                    "case_id": case_number,
-                    "name": person_name,
-                    "case_nature": '工亡案件' if self.death_case_checkbox.isChecked() else '工伤案件',
-                    "applicant_type": '个人申请' if is_personal else '单位申请',
-                    "unit_type": (self.unit_type_combo.currentText().strip()
-                                  if hasattr(self, 'unit_type_combo') else '') or DEFAULT_UNIT_TYPE,
-                    # 个人×工亡的申请人语义占位为职工(近亲属语义待工亡阶段细化)
-                    "applicant_name": person_name if is_personal else self.get_data('用人单位', ''),
-                    "folder_name": os.path.basename(folder_path) if folder_path else '',
-                    "materials": [], "witnesses": [], "legal_reps": [],
-                }
-                cases[case_number] = case_obj
-            case_obj["folder_name"] = os.path.basename(folder_path) if folder_path else case_obj.get("folder_name", '')
-            case_obj["transcript_file"] = transcript_file
-            self._save_cases_data(cases)
-            return True
-        except Exception as e:
-            logger.warning(f"⚠️ 更新工亡案件数据失败: {e}")
             return False
 
     # ========================================================================
@@ -4987,24 +4915,6 @@ class MainWindow(QWidget, Ui_Form):
         date = datetime.datetime.now().strftime("%Y%m%d")
         id_last4 = id_card[-4:] if id_card and len(id_card) >= 4 else "xxxx"
         return f"{person_name}-{prefix}{date}{id_last4}"
-    def get_company_info(self) -> Dict[str, str]:
-        """获取公司相关信息（company_pane=用人单位，construction_company=用工单位）"""
-        employer = self.construction_company.currentText().strip()
-        labor_unit = self.company_pane.currentText().strip()
-        site = self.construction_plant.currentText().strip()
-
-        if not employer:
-            employer = self.get_data('用工单位', '')
-        if not labor_unit:
-            labor_unit = self.get_data('用人单位', '')
-        if not site:
-            site = self.get_data('工地名称', '')
-
-        return {
-            '用工单位': employer,
-            '用人单位': labor_unit,
-            '工地名称': site
-        }
     def init_comboboxes(self):
         """初始化所有组合框"""
         self.init_combobox(self.company_pane, self.items_list1)
@@ -5124,90 +5034,6 @@ class MainWindow(QWidget, Ui_Form):
         except Exception as e:
             import traceback
             traceback.print_exc()
-    def _save_death_case_info(self):
-        """工亡案件：只保存本人信息 + 生成案本号 + 创建文件夹，不生成笔录"""
-        try:
-            # 1. 收集本人信息
-            self.update_role_info("本人")
-
-            # 2. 获取受伤职工姓名
-            person_name = self.get_data("本人姓名", "")
-            if not person_name:
-                person_name = self.name_pane.text().strip()
-                if person_name:
-                    self.set_data("本人姓名", person_name, "basic")
-                else:
-                    self._set_status("请输入姓名", "red")
-                    return
-
-            # 3. 更新公司信息
-            company_info = self.get_company_info()
-            for key, value in company_info.items():
-                if value:
-                    self.set_data(key, value, "company")
-
-            # 4. 使用或生成案本号
-            case_number = self.lineEdit_2.text().strip()
-            if not case_number:
-                id_card = self.idnumer_pane.text().strip()
-                case_number = self._auto_generate_case_number(person_name, id_card)
-                self.lineEdit_2.setText(case_number)
-            self.set_data("案本号", case_number, "case")
-
-            # 5. 创建案件文件夹
-            from datetime import datetime
-            case_info = {
-                "case_number": case_number,
-                "person_name": person_name.strip(),
-                "id_card": self.get_data("本人身份证号", ""),
-            }
-            self.current_case_folder = self.file_service.create_enhanced_case_folder(
-                self.BASE_PATH, case_info
-            )
-            self.current_person_name = person_name
-
-            # 6. 保存本人信息到文件夹（TXT）
-            info_file = os.path.join(self.current_case_folder, f"{person_name}基本信息.txt")
-            with open(info_file, "w", encoding="utf-8") as f:
-                f.write(f"案本号：{case_number}\n")
-                f.write(f"案件性质：工亡\n")
-                f.write(f"申请类型：{'个人申请' if self.personal_application_checkbox.isChecked() else '单位申请'}\n")
-                f.write(f"姓名：{person_name}\n")
-                f.write(f"性别：{self.lineEdit.text().strip()}\n")
-                f.write(f"身份证号：{self.idnumer_pane.text().strip()}\n")
-                f.write(f"年龄：{self.age_pane.text().strip()}\n")
-                f.write(f"身份证地址：{self.textEdit.toPlainText().strip()}\n")
-                f.write(f"电话：{self.lineEdit_4.text().strip()}\n")
-                f.write(f"岗位：{self.lineEdit_5.text().strip()}\n")
-                f.write(f"单位性质：{(self.unit_type_combo.currentText().strip() if hasattr(self, 'unit_type_combo') else '') or DEFAULT_UNIT_TYPE}\n")
-                f.write(f"身份：{(self.identity_edit.text().strip() if hasattr(self, 'identity_edit') else '') or DEFAULT_IDENTITY}\n")
-                f.write(f"公司：{company_info.get('用工单位', '')}\n")
-                f.write(f"用人单位：{company_info.get('用人单位', '')}\n")
-                f.write(f"工地名称：{company_info.get('工地名称', '')}\n")
-                f.write(f"案件陈述：{self.statement_edit.toPlainText().strip() if hasattr(self, 'statement_edit') else ''}\n")
-                f.write(f"保存时间：{_date_now()}{_time_now()}\n")
-            print(f"📄 基本信息已保存: {info_file}")
-
-            # 7. 更新案件数据
-            self._update_case_in_data(
-                case_number=case_number,
-                person_name=person_name,
-                folder_path=self.current_case_folder,
-                transcript_file=f"{person_name}基本信息.txt"
-            )
-
-            # 8. 状态提示
-            self._set_status(
-                f"工亡案件信息已保存 案本号:{case_number} | 可搜索'{person_name}'关联证人和家属笔录",
-                "green"
-            )
-            print(f"✅ 工亡案件已保存: {case_number} 文件夹: {self.current_case_folder}")
-
-        except Exception as e:
-            logger.error(f"❌ 保存工亡信息失败: {e}")
-            import traceback
-            traceback.print_exc()
-            self._set_status(f"保存失败: {e}", "red")
     def process_id_info(self, role):
         """处理身份证信息并更新性别显示（使用DataService）"""
         try:

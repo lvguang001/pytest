@@ -89,12 +89,6 @@ def deadline_iso(deliver_time: str, doc: str, method: str) -> str:
     return add_days(deliver_time, days)
 
 
-def remaining_days(deliver_time: str, doc: str, method: str, today: str = None) -> int:
-    """剩余天数 = 期限日 - 今天（>0 未到期；=0 期限到日当天；<0 已过期限）。"""
-    today = today or today_iso()
-    return days_between(today, deadline_iso(deliver_time, doc, method))
-
-
 def _now_str() -> str:
     return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
