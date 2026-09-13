@@ -26,7 +26,8 @@ python -m pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-当前 100 个用例、约 3 秒。分三层：投影层纯函数（无 Qt，最快）、角色数据隔离（走 Qt）、日志与备份。
+当前 134 个用例、约 3 秒。分四层：投影层纯函数（无 Qt，最快）、角色与布局（走 Qt）、
+案件备份、日志与异常兜底。
 
 ## 目录结构
 
