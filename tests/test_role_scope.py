@@ -384,6 +384,268 @@ class Test信息提示方框:
 
 
 # ============================================================================
+# 「案件申请陈述」已从数据链路断开
+# ============================================================================
+
+class Test案件申请陈述已断开:
+    """输入框仍在界面上（待重新设计），但已不再影响案件数据。
+
+    注意：断开的是**界面**，不是数据——`{{受伤经过}}` 出现在告知书、审批表、
+    谈话通知书等 5 个文书模板里，必须还有值可取。
+    """
+
+    def test_输入框不影响收集到的数据(self, win):
+        win.set_data("受伤经过", "", "investigation")
+        win.statement_edit.setPlainText("我在框里打的字")
+        data, _, _, _ = win._collect_review_data()
+        assert data["injury_desc"] == "", "陈述框仍在影响案件数据"
+
+    def test_受伤经过改从数据模型取(self, win):
+        win.set_data("受伤经过", "数据模型里的内容", "investigation")
+        data, _, _, _ = win._collect_review_data()
+        assert data["injury_desc"] == "数据模型里的内容"
+
+    def test_加载案件不回填输入框(self, win):
+        win.statement_edit.setPlainText("残留旧字")
+        win._apply_case_object({"case_id": "c1",
+                                "injury_description": "案卷里的受伤经过"})
+        assert win.statement_edit.toPlainText() == "", "陈述框被回填了，会误导用户"
+        assert win.get_data("受伤经过", "") == "案卷里的受伤经过"
+
+    def test_受伤经过仍能到达文书模板(self, win):
+        """断开界面不等于丢数据——5 个文书模板都靠 {{受伤经过}}"""
+        win._apply_case_object({"case_id": "c1", "injury_description": "案卷内容"})
+        data, materials, _, _ = win._collect_review_data()
+        case = win._build_case_object(data, materials)
+
+        assert case["injury_description"] == "案卷内容"
+        assert win._build_unified_template_data(case).get("受伤经过") == "案卷内容"
+
+    def test_存档往返不丢受伤经过(self, win, tmp_path, monkeypatch):
+        monkeypatch.setattr(win, "BASE_PATH", str(tmp_path))
+        win._apply_case_object({"case_id": "c1", "injury_description": "案卷内容"})
+        data, materials, _, _ = win._collect_review_data()
+        win._save_cases_data({"c1": win._build_case_object(data, materials)})
+
+        assert win._load_cases_data()["c1"]["injury_description"] == "案卷内容"
+
+    def test_F2预设的陈述仍进数据模型(self, win):
+        """预设里的陈述原先靠输入框带入，断开后要改走数据模型"""
+        win._cycle_test_data()
+        assert win.get_data("受伤经过", "") != "", "F2 预设的陈述没进数据模型"
+
+
+# ============================================================================
+# 条例目录
+# ============================================================================
+
+class Test条例目录:
+
+    def test_第十四条第七项已移除(self):
+        """兜底条款（法律行政法规规定的其他情形）实际极少用到，已整体去掉"""
+        from case_classifier import CaseClassifier
+        assert "第十四条第（七）项" not in CaseClassifier.REGULATIONS
+        assert len(CaseClassifier.REGULATIONS) == 9
+
+    def test_下拉框不含第七项(self, win):
+        from case_classifier import CaseClassifier
+        texts = [win.comboBox.itemText(i) for i in range(win.comboBox.count())]
+        assert not any("第七项" in t for t in texts)
+        assert win.comboBox.count() == len(CaseClassifier.REGULATIONS)
+
+    def test_提示词对照表已同步(self):
+        """AI 靠这张对照表判定条例，留下已删的项会让它返回不存在的条例。
+
+        两处副本都要查：外置的 txt 文件，以及 prompt_manager 里的兜底默认值。
+        """
+        import io
+        import prompt_manager
+
+        path = "resource/prompts/条例分析系统.txt"
+        assert "第十四条第（七）项" not in io.open(path, encoding="utf-8").read(), \
+            f"{path} 里还留着已删的条例"
+        assert "第十四条第（七）项" not in prompt_manager.DEFAULT_PROMPTS["regulation_system"], \
+            "prompt_manager 的兜底副本没同步"
+
+    def test_F2预设选中的条例与预期一致(self, win):
+        """回归：预设原先用下拉索引定位，删掉中间一项后工亡预设会静默指错"""
+        import app_main as A
+        for _ in range(len(A.TEST_DATA_PRESETS)):
+            win._cycle_test_data()
+            # 读「实际被应用」的那一组：F2 索引可能已被前面的用例推进过，
+            # 不能假设它从 0 开始
+            preset = A.TEST_DATA_PRESETS[win._test_data_index]
+            expect = A._regulation_short_to_full(preset["regulation"])
+            assert win.comboBox.currentText() == expect, \
+                f"{preset['name']} 选中的条例不对"
+
+
+# ============================================================================
+# 证据清单（条例 × 案件性质 × 申请类型）
+# ============================================================================
+
+class Test证据清单:
+
+    def _req(self, reg, death, personal, unit="企业"):
+        from app_main import compose_evidence
+        return [n for n, r in compose_evidence(reg, death, personal, unit) if r]
+
+    def _all(self, reg, death, personal, unit="企业"):
+        from app_main import compose_evidence
+        return [n for n, _ in compose_evidence(reg, death, personal, unit)]
+
+    def test_通用必要项(self):
+        assert self._req("第十四条第（一）项", False, False) == \
+            ["身份证", "劳动合同", "医院诊断证明"]
+
+    def test_条例特有项(self):
+        """交通事故那一条，「非本人主要责任」靠认定书，属必要"""
+        assert "道路交通事故认定书" in self._req("第十四条第（六）项", False, False)
+        assert "职业病诊断证明" in self._req("第十四条第（四）项", False, False)
+
+    def test_工亡追加死亡证明(self):
+        """回归：工亡 + 第十四条第（一）项 是合法组合。
+
+        原先只按条例取证据，会漏掉死亡证明——工亡案没它办不下去。
+        """
+        assert "死亡证明" in self._req("第十四条第（一）项", True, False)
+        assert "死亡证明" not in self._req("第十四条第（一）项", False, False)
+
+    def test_个人申请追加劳动关系佐证(self):
+        allx = self._all("第十四条第（一）项", False, True)
+        assert "劳动关系裁决书" in allx
+        assert "劳动关系裁决书" not in self._all("第十四条第（一）项", False, False)
+
+    def test_个人工亡追加近亲属关系证明(self):
+        """工亡由近亲属代为申请，要证明「有资格申请」"""
+        req = self._req("第十五条第（一）项", True, True)
+        assert any("近亲属关系证明" in n for n in req)
+        assert "申请人身份证" in req
+        assert not any("近亲属关系证明" in n
+                       for n in self._req("第十五条第（一）项", True, False)), \
+            "单位申请的工亡案不该要近亲属关系证明"
+
+    def test_机关公务员换成人事关系证明(self):
+        """公务员不是劳动合同关系——劳动合同降为可能，换成录用与在编证明"""
+        req = self._req("第十四条第（一）项", False, False, "机关（公务员）")
+        assert "劳动合同" not in req
+        assert "公务员录用审批文件" in req
+        assert "公务员在编证明" in req
+        assert "劳动合同" in self._all("第十四条第（一）项", False, False, "机关（公务员）")
+
+    def test_事业单位用聘用合同(self):
+        req = self._req("第十四条第（一）项", False, False, "事业单位")
+        assert "劳动合同" not in req
+        assert "聘用合同" in req
+        assert "事业单位在编证明" in req
+
+    def test_企业不受影响(self):
+        assert self._req("第十四条第（一）项", False, False, "企业") == \
+            ["身份证", "劳动合同", "医院诊断证明"]
+
+    def test_同名只留一条且按必要算(self):
+        """死亡证明同时出现在条例层与工亡层，不能列两遍"""
+        from app_main import compose_evidence
+        items = compose_evidence("第十五条第（一）项", True, False)
+        names = [n for n, _ in items]
+        assert names.count("死亡证明") == 1
+        assert ("死亡证明", True) in items
+
+    def test_必要排在可能之前(self):
+        from app_main import compose_evidence
+        flags = [r for _, r in compose_evidence("第十五条第（一）项", True, True)]
+        assert flags == sorted(flags, reverse=True), "必要项应全部排在可能项前面"
+
+
+class Test证据清单界面:
+
+    @pytest.fixture(autouse=True)
+    def _reset(self, win):
+        """两个复选框是共享状态，每个用例先归零"""
+        win.death_case_checkbox.setChecked(False)
+        win.personal_application_checkbox.setChecked(False)
+        win.material_list.clear()
+        win._refresh_evidence_list()
+        yield
+
+    def _names(self, win):
+        return [r["_name_edit"].text() for r in win.material_list._rows]
+
+    def test_启动时按当前条例列出(self, win):
+        from app_main import compose_evidence
+        expect = [n for n, _ in compose_evidence("第十四条第（一）项", False, False)]
+        assert self._names(win) == expect
+
+    def test_切到工亡会补上死亡证明(self, win):
+        """回归：apply_evidence_list 曾在删除旧行之前算「已存在」，
+        导致刚删掉的名字永远加不回来——死亡证明就是这么丢的"""
+        win.death_case_checkbox.setChecked(True)
+        assert "死亡证明" in self._names(win)
+
+    def test_切换后原有项不会消失(self, win):
+        """回归：apply_evidence_list 曾在删除旧行**之前**算「已存在」这个名字集合，
+        于是旧行删掉后同名项被当成「已经有了」跳过、不再加回——
+        切一次工亡，9 项基础材料会全部消失。"""
+        before = self._names(win)
+        win.death_case_checkbox.setChecked(True)
+        after = self._names(win)
+
+        missing = [n for n in before if n not in after]
+        assert not missing, f"切换后这些项凭空消失了：{missing}"
+
+    def test_关闭再打开工亡仍能补回死亡证明(self, win):
+        """移除过再恢复的项也要能加回来"""
+        win.death_case_checkbox.setChecked(True)
+        win.death_case_checkbox.setChecked(False)     # 此时死亡证明被移除
+        win.death_case_checkbox.setChecked(True)      # 必须能补回来
+        assert "死亡证明" in self._names(win), "被移除过的项加不回来了"
+
+    def test_切回后多余的项消失(self, win):
+        win.death_case_checkbox.setChecked(True)
+        assert "死亡证明" in self._names(win)
+        win.death_case_checkbox.setChecked(False)
+        assert "死亡证明" not in self._names(win)
+
+    def test_换条例时勾选状态保留(self, win):
+        row = win.material_list._rows[1]              # 劳动合同
+        row["_cb"].setChecked(True)
+        row["_note"].setText("复印件")
+
+        win.death_case_checkbox.setChecked(True)
+        win.death_case_checkbox.setChecked(False)
+
+        again = [r for r in win.material_list._rows
+                 if r["_name_edit"].text() == "劳动合同"][0]
+        assert again["_cb"].isChecked(), "换条例把勾好的清掉了"
+        assert again["_note"].text() == "复印件", "备注被清掉了"
+
+    def test_手工添加的行不被重建冲掉(self, win):
+        win.material_list.add_row("我自己的材料", True, "手工加的")
+        win.death_case_checkbox.setChecked(True)
+
+        kept = [r for r in win.material_list._rows
+                if r["_name_edit"].text() == "我自己的材料"]
+        assert len(kept) == 1 and kept[0]["_cb"].isChecked()
+
+    def test_必要项粉红_可能项黑色(self, win):
+        import re
+        colors = {}
+        for r in win.material_list._rows:
+            css = r["_name_edit"].styleSheet()
+            colors[r["_name_edit"].text()] = re.search(r"color:\s*(#[0-9a-fA-F]+)", css).group(1)
+
+        assert colors["身份证"] == win.material_list.REQUIRED_COLOR, "必要项应为粉红"
+        assert colors["工资发放记录"] == win.material_list.POSSIBLE_COLOR, "可能项应为黑"
+
+    def test_备注栏不跟着变粉(self, win):
+        import re
+        for r in win.material_list._rows:
+            css = r["_note"].styleSheet()
+            assert re.search(r"color:\s*(#[0-9a-fA-F]+)", css).group(1) == \
+                win.material_list.POSSIBLE_COLOR
+
+
+# ============================================================================
 # 主界面布局
 # ============================================================================
 

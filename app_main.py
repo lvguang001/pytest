@@ -281,10 +281,88 @@ REGULATION_ELEMENTS = {
 
 
 def _regulation_elements(short: str) -> list:
-    """返回拟用条例对应的法律要件列表；未知条例（含第十四条第（七）项兜底）返回空列表"""
+    """返回拟用条例对应的法律要件列表；未知条例返回空列表"""
     if not short:
         return []
     return list(REGULATION_ELEMENTS.get(short.strip(), []))
+
+
+# ============================================================================
+# 书面证据清单：条例 × 案件性质 × 申请类型 三层叠加
+# ----------------------------------------------------------------------------
+# 单看条例不够——同一个条例下，工亡案件还要死亡证明，个人申请还要劳动关系的
+# 补充证明，工亡由近亲属代为申请还要关系证明。见 compose_evidence()。
+# 「是否已提供」由材料面板的复选框承载，不在这里判断。
+# ============================================================================
+
+# L1 《条例》第18条要求的通用材料（所有工伤认定申请都要）
+_BASE_EVIDENCE_REQUIRED = ("身份证", "劳动合同", "医院诊断证明")
+
+# L3 工亡案件追加
+_DEATH_EVIDENCE_REQUIRED = ("死亡证明",)
+_DEATH_EVIDENCE_POSSIBLE = ("抢救病历（含抢救时间记录）", "死亡原因证明")
+
+# L4 个人申请追加（单位不配合时劳动关系往往要靠这些佐证；劳动合同与
+# 劳动关系裁决书都列出，勾哪个就说明是哪种情况）
+_SELF_APPLY_EVIDENCE_POSSIBLE = ("劳动关系裁决书", "单位未在规定时限内申报的证明")
+
+# L2.5 单位性质修饰：机关（公务员）/事业单位 的人员不是劳动合同关系，而是人事
+# 关系——「劳动合同」降为可能，换成各自的人事关系证明与在编证明。
+_NON_ENTERPRISE_EVIDENCE_REQUIRED = {
+    "机关（公务员）": ("公务员录用审批文件", "公务员在编证明"),
+    "事业单位": ("聘用合同", "事业单位在编证明"),
+}
+
+# L5 个人申请 + 工亡：申请人是近亲属，还要证明「有资格申请」
+_KIN_APPLY_EVIDENCE_REQUIRED = ("近亲属关系证明（户口簿/结婚证等）", "申请人身份证")
+_KIN_APPLY_EVIDENCE_POSSIBLE = ("其他近亲属授权委托书或放弃声明",)
+
+
+def compose_evidence(regulation_short: str, is_death_case: bool,
+                     is_personal_apply: bool,
+                     unit_type: str = DEFAULT_UNIT_TYPE) -> List[Tuple[str, bool]]:
+    """合成证据清单，返回 [(材料名称, 是否必要), ...]。
+
+    四个信号：拟用条例 × 单位性质 × 案件性质（工亡）× 申请类型（个人）。
+    顺序：必要在前、可能在后；同名只留一条（在两层都出现时按「必要」算）。
+    """
+    required = list(_BASE_EVIDENCE_REQUIRED)
+    possible: List[str] = []
+
+    # 非企业单位：劳动合同降为可能，换成人事关系与在编证明
+    unit_extra = _NON_ENTERPRISE_EVIDENCE_REQUIRED.get((unit_type or "").strip())
+    if unit_extra:
+        required.remove("劳动合同")
+        possible.insert(0, "劳动合同")
+        required += list(unit_extra)
+
+    reg = _REGULATION_CATALOG.get((regulation_short or "").strip(), {})
+    ev = reg.get("evidence") or {}
+    required += list(ev.get("required") or [])
+    possible += list(ev.get("possible") or [])
+
+    if is_death_case:
+        required += list(_DEATH_EVIDENCE_REQUIRED)
+        possible += list(_DEATH_EVIDENCE_POSSIBLE)
+
+    if is_personal_apply:
+        possible += list(_SELF_APPLY_EVIDENCE_POSSIBLE)
+        if is_death_case:                      # 工亡由近亲属代为申请
+            required += list(_KIN_APPLY_EVIDENCE_REQUIRED)
+            possible += list(_KIN_APPLY_EVIDENCE_POSSIBLE)
+
+    out: List[Tuple[str, bool]] = []
+    seen = set()
+    for name in required:
+        if name and name not in seen:
+            seen.add(name)
+            out.append((name, True))
+    for name in possible:
+        if name and name not in seen:
+            seen.add(name)
+            out.append((name, False))
+    return out
+
 
 _REG_CN_DIGITS = {
     "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
@@ -426,7 +504,7 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'lineEdit_4': '13888880001',
   'lineEdit_5': '泥水工',
   'injured_worker': '张三',
-  'comboBox': 0,
+  'regulation': '第十四条第（一）项',
   'company_pane': '温州YY建筑劳务有限公司',
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
@@ -445,7 +523,7 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'lineEdit_4': '13900001111',
   'lineEdit_5': '钢筋工',
   'injured_worker': '刘大',
-  'comboBox': 0,
+  'regulation': '第十四条第（一）项',
   'company_pane': '温州YY建筑劳务有限公司',
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
@@ -465,7 +543,7 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'lineEdit_5': '',            # 家属自己的岗位（无单位 → 留空）
   'identity': '母子',          # 家属这一栏＝与死者关系
   'injured_worker': '王五',
-  'comboBox': 7,
+  'regulation': '第十五条第（一）项',
   'company_pane': '',          # 家属无单位 → 岗位一并留空
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
@@ -485,7 +563,7 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'lineEdit_5': '缝纫工',      # 家属自己的岗位
   'identity': '夫妻',          # 家属这一栏＝与死者关系
   'injured_worker': '赵六',
-  'comboBox': 7,
+  'regulation': '第十五条第（一）项',
   'company_pane': '温州XX服装有限公司',   # 家属自己的工作单位（独立于死者单位）
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
@@ -504,7 +582,7 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'lineEdit_4': '13500004444',
   'lineEdit_5': '钢筋工',
   'injured_worker': '张三',
-  'comboBox': 0,
+  'regulation': '第十四条第（一）项',
   'company_pane': '温州YY建筑劳务有限公司',
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
@@ -521,7 +599,7 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'lineEdit_4': '13400005555',
   'lineEdit_5': '泥水工',
   'injured_worker': '刘大',
-  'comboBox': 0,
+  'regulation': '第十四条第（一）项',
   'company_pane': '温州YY建筑劳务有限公司',
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
@@ -539,7 +617,7 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'lineEdit_5': '送货员',            # 证人自己的岗位
   'identity': '职工',
   'injured_worker': '刘大',
-  'comboBox': 0,
+  'regulation': '第十四条第（一）项',
   'company_pane': '永嘉ZZ物流有限公司',   # 证人来自其它单位，与案件用人单位不同
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
@@ -556,7 +634,7 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'lineEdit_5': '总经理',            # 法人这一栏＝职务
   'identity': '法定代表人',          # 法人这一栏＝身份
   'injured_worker': '张三',
-  'comboBox': 0,
+  'regulation': '第十四条第（一）项',
   'company_pane': '温州YY建筑劳务有限公司',
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
@@ -576,7 +654,7 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'lineEdit_4': '13811112222',
   'lineEdit_5': '行政审批窗口岗位',
   'injured_worker': '孙某',
-  'comboBox': 0,
+  'regulation': '第十四条第（一）项',
   'company_pane': '温州市XX局',
   'construction_company': '',
   'construction_plant': '',
@@ -596,7 +674,7 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
   'lineEdit_4': '13822223333',
   'lineEdit_5': '专技岗位',
   'injured_worker': '周某',
-  'comboBox': 0,
+  'regulation': '第十四条第（一）项',
   'company_pane': '温州市XX检验检测中心',
   'construction_company': '',
   'construction_plant': '',
@@ -789,8 +867,28 @@ class MaterialListWidget(QWidget):
         self.scroll.setWidget(self._container)
         layout.addWidget(self.scroll)
 
-    def _make_row(self, name: str = "", provided: bool = False, notes: str = ""):
-        """创建一行材料条目"""
+    REQUIRED_COLOR = "#e75480"    # 必要证据：粉红
+    POSSIBLE_COLOR = "#000000"    # 可能证据：黑
+
+    @staticmethod
+    def _edit_css(color: str) -> str:
+        return f"""
+            QLineEdit {{
+                font-size: 8pt;
+                color: {color};
+                border: 1px solid #ddd;
+                border-radius: 1px;
+                padding: 1px 3px;
+                background-color: #fff;
+            }}
+            QLineEdit:focus {{
+                border-color: #3498db;
+            }}
+        """
+
+    def _make_row(self, name: str = "", provided: bool = False, notes: str = "",
+                  required: bool = False):
+        """创建一行材料条目；required=True 时名称用粉红标出"""
         row = QWidget()
         row.setFixedHeight(23)
         h = QHBoxLayout(row)
@@ -807,37 +905,41 @@ class MaterialListWidget(QWidget):
         # 材料名称输入框（可编辑）
         name_edit = QLineEdit(name if name else "")
         name_edit.setPlaceholderText("材料名称...")
-        name_edit.setStyleSheet("""
-            QLineEdit {
-                font-size: 8pt;
-                border: 1px solid #ddd;
-                border-radius: 1px;
-                padding: 1px 3px;
-                background-color: #fff;
-            }
-            QLineEdit:focus {
-                border-color: #3498db;
-            }
-        """)
-        name_edit.setMinimumWidth(100)
+        name_edit.setStyleSheet(
+            self._edit_css(self.REQUIRED_COLOR if required else self.POSSIBLE_COLOR))
+        name_edit.setMinimumWidth(140)
+
+        # 名字放不下时靠悬停看全（自动生成的证据名可以很长），随文本更新
+        def _sync_tip(txt, edit=name_edit, req=required):
+            edit.setToolTip(("必要证据\n" if req else "") + (txt or "材料名称"))
+
+        _sync_tip(name)
+        name_edit.textChanged.connect(_sync_tip)
         name_edit.textChanged.connect(self._on_changed)
 
-        # 备注输入框
+        # 备注输入框（一律黑色，不跟着必要项变粉）
         note_edit = QLineEdit()
         note_edit.setText(notes)
         note_edit.setPlaceholderText("备注...")
-        note_edit.setStyleSheet(name_edit.styleSheet())
+        note_edit.setStyleSheet(self._edit_css(self.POSSIBLE_COLOR))
         note_edit.textChanged.connect(self._on_changed)
 
         h.addWidget(cb)
-        h.addWidget(name_edit, 1)   # stretch=1，自动填充剩余空间
-        h.addWidget(note_edit, 2)   # stretch=2，备注更宽
+        # 名称栏要比备注宽：自动生成的证据名可能很长（如
+        # 「近亲属关系证明（户口簿/结婚证等）」），挤窄了就看不清
+        h.addWidget(name_edit, 3)
+        h.addWidget(note_edit, 2)
 
         return row, cb, name_edit, note_edit
 
-    def add_row(self, name: str = "", provided: bool = False, notes: str = ""):
-        """在末尾添加一行"""
-        row, cb, name_edit, note = self._make_row(name, provided, notes)
+    def add_row(self, name: str = "", provided: bool = False, notes: str = "",
+                required: bool = False, generated: bool = False):
+        """在末尾添加一行。
+
+        generated=True 表示这行是按证据清单自动生成（换条例时会被重建）；
+        案件自带的、以及手工添加的行不是 generated，重建时保留。
+        """
+        row, cb, name_edit, note = self._make_row(name, provided, notes, required)
         # 在 stretch 之前插入
         self._row_layout.insertWidget(self._row_layout.count() - 1, row)
 
@@ -849,8 +951,33 @@ class MaterialListWidget(QWidget):
             "_name_edit": name_edit,
             "_note": note,
             "_row": row,
+            "_required": required,
+            "_generated": generated,
         }
         self._rows.append(item)
+
+    def apply_evidence_list(self, items):
+        """按证据清单重建「自动生成」的行；已勾选状态按名称沿用。
+
+        案件自带/手工添加的行不动，同名项也不重复添加。
+        """
+        kept_state = {r["_name_edit"].text(): (r["_cb"].isChecked(), r["_note"].text())
+                      for r in self._rows}
+
+        for r in [r for r in self._rows if r.get("_generated")]:
+            r["_row"].setParent(None)
+            self._rows.remove(r)
+
+        # 必须在删掉旧的自动行之后再算——否则刚被删掉的名字仍算「已存在」，
+        # 新的清单里同名项会被跳过，永远加不回来（切到工亡时死亡证明就是这样丢的）
+        existing = {r["_name_edit"].text() for r in self._rows}
+
+        for name, required in items:
+            if name in existing:
+                continue
+            provided, notes = kept_state.get(name, (False, ""))
+            self.add_row(name, provided, notes, required=required, generated=True)
+        self._on_changed()
 
     def set_materials(self, data: List[Dict[str, Any]]):
         """批量设置材料列表"""
@@ -1198,6 +1325,15 @@ class MainWindow(QWidget, Ui_Form):
         # 右栏两框加大、底边与左栏最后一行齐平（依赖上一步定下的左栏位置）
         self._grow_right_panels()
 
+        # 证据清单：启动时先按当前条例/案件性质/申请类型列一遍，
+        # 之后三者任一变化都跟着重算
+        self._refresh_evidence_list()
+        self.comboBox.currentIndexChanged.connect(self._refresh_evidence_list)
+        self.death_case_checkbox.stateChanged.connect(self._refresh_evidence_list)
+        self.personal_application_checkbox.stateChanged.connect(self._refresh_evidence_list)
+        if hasattr(self, 'unit_type_combo'):
+            self.unit_type_combo.currentTextChanged.connect(self._refresh_evidence_list)
+
         print("=" * 50)
         print("🎉 MainWindow 初始化完成")
         print("=" * 50)
@@ -1344,8 +1480,9 @@ class MainWindow(QWidget, Ui_Form):
             'labor_unit': self_unit,
             'unit': self_unit,
             'site': self.get_data('工地名称', '') or self.construction_plant.currentText().strip(),
-            'injury_desc': self.statement_edit.toPlainText().strip() if hasattr(self, 'statement_edit')
-                           else self.get_data('受伤经过', ''),
+            # 「案件申请陈述」输入框已停用，受伤经过改从数据模型取——
+            # 界面上那个框填什么都不再影响文书（值仍由 _apply_case_object 写入）
+            'injury_desc': self.get_data('受伤经过', ''),
         }
         materials = (self.material_list.get_materials() if hasattr(self, 'material_list') else []) \
             or self.data_model.investigation.get('本人材料', [])
@@ -1452,15 +1589,18 @@ class MainWindow(QWidget, Ui_Form):
         self._set_combo_or_type(self.construction_plant, case_obj.get('site', ''))
         self.set_data('工地名称', case_obj.get('site', ''), 'company')
 
-        # 受伤经过
-        if hasattr(self, 'statement_edit'):
-            self.statement_edit.setPlainText(str(case_obj.get('injury_description', '')))
+        # 受伤经过：只写数据模型，不再回填到「案件申请陈述」框
+        # （该框已停用，回填会让用户以为改了有效——见 _setup_api_config_ui 的说明）
         self.set_data('受伤经过', case_obj.get('injury_description', ''), 'investigation')
+        if hasattr(self, 'statement_edit'):
+            self.statement_edit.clear()   # 清掉残留，免得看着像本案陈述
 
         # 材料清单（本人）—— JSON 里只存了「已提供」，转回界面格式
         materials_full = _to_full_materials(case_obj.get('materials', []))
         if hasattr(self, 'material_list'):
             self.material_list.set_materials(materials_full)
+            # 载入案件自带材料后，再补上按条例/性质应备而清单里没有的
+            self._refresh_evidence_list()
         self.data_model.investigation['本人材料'] = materials_full
 
         # 法人信息回写（统一规范人记录 → 法人* 扁平兼容键，含性别/年龄）
@@ -1963,6 +2103,27 @@ class MainWindow(QWidget, Ui_Form):
 
         for w in (wlab, wcombo, wbtn):
             w.show()
+
+    def _refresh_evidence_list(self, *_ignored):
+        """按当前的 拟用条例 / 工亡案件 / 个人案件 重算材料清单。
+
+        下拉框与两个复选框任一变化都会重算（都接到了这里，故用 *_ignored 吞掉
+        Qt 传来的 index/state 参数）。
+
+        案件自带和手工添加的材料不受影响，同名项也不会重复
+        （见 MaterialListWidget.apply_evidence_list）。
+        """
+        if not hasattr(self, "material_list"):
+            return
+        short = (self.get_data('拟用条例', '')
+                 or _regulation_full_to_short(self.comboBox.currentText().strip()))
+        unit_type = (self.unit_type_combo.currentText().strip()
+                     if hasattr(self, 'unit_type_combo') else DEFAULT_UNIT_TYPE)
+        items = compose_evidence(short,
+                                 self.death_case_checkbox.isChecked(),
+                                 self.personal_application_checkbox.isChecked(),
+                                 unit_type)
+        self.material_list.apply_evidence_list(items)
 
     def _align_role_radios(self):
         """把「家属」抬到与本人/证人/法人同一行，四个角色排成一行。
@@ -2844,7 +3005,11 @@ class MainWindow(QWidget, Ui_Form):
             self.lineEdit_2.clear()
 
         # ── 条例下拉框 ──
-        self.comboBox.setCurrentIndex(data["comboBox"])
+        # 拟用条例按规范短名定位，不要用索引——增删条例会让索引整体位移，
+        # 预设就静默指到别的条例上去了
+        _reg_idx = self.comboBox.findText(_regulation_short_to_full(data.get("regulation", "")))
+        if _reg_idx >= 0:
+            self.comboBox.setCurrentIndex(_reg_idx)
 
         # ── 公司下拉框 ──
         self._set_combo_or_type(self.company_pane, data["company_pane"])
@@ -2890,12 +3055,11 @@ class MainWindow(QWidget, Ui_Form):
             self.set_data('案本号', '', 'case')  # 同时清掉数据模型里缓存的旧案本号
             self.lineEdit_2.clear()  # 测试轮换时清掉界面案本号，点击后重新生成
 
-        if hasattr(self, 'statement_edit'):
-            stmt = data.get("statement_edit", "")
-            # 本人填案件陈述；证人/法人无陈述则清空
-            self.statement_edit.setPlainText(stmt)
-            if is_same_case:
-                print(f"📋 同案沿用案件陈述（{current_worker}）")
+        # 案件陈述：原「案件申请陈述」框已停用，预设里的陈述直接写数据模型，
+        # 仍供文书/提示词的 {{受伤经过}} 使用
+        self.set_data('受伤经过', data.get("statement_edit", ""), 'investigation')
+        if is_same_case:
+            print(f"📋 同案沿用案件陈述（{current_worker}）")
 
         # 材料：只有本人的证据有效（证人/法人的证据不保存）
         if role == "本人":
@@ -3639,6 +3803,9 @@ class MainWindow(QWidget, Ui_Form):
         # 5. 右侧面板：案件申请陈述（上）
         # ============================================================
         STATEMENT_H = 350
+        # 注意：「案件申请陈述」这一栏已从数据链路上断开——框里填什么都不再进入
+        # 案件数据，也不再回填。受伤经过改从数据模型的「受伤经过」取
+        # （见 _collect_review_data / _apply_case_object）。界面暂时保留待重新设计。
         self.statement_group = QGroupBox("案件申请陈述", self)
         self.statement_group.setGeometry(RIGHT_PANEL_X, TOP_BAR_H + 3,
                                          RIGHT_PANEL_W, STATEMENT_H)
