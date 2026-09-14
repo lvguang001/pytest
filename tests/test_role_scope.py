@@ -1137,3 +1137,199 @@ class Test谈话笔录生成路径:
         assert not hasattr(app_main, 'RegulationAnalyzeWorker'), '条例判断工作线程又回来了'
         assert 'regulation_system' not in pm.PROMPT_FILES
         assert 'regulation_user' not in pm.PROMPT_FILES
+
+
+# ============================================================================
+# 本人笔录已存在：先问要不要覆盖
+# ============================================================================
+
+class Test本人笔录覆盖确认:
+    """本人笔录已存在时先问「是否覆盖」，点「是」删掉旧的再按主界面当前数据重新生成。
+
+    以前重生一路加序号，盘上堆出 (2)(3)；用户要的是覆盖。只动旧的本人笔录文件——
+    案卷目录与案件数据都不碰（数据随后由数据核对用主界面当前值重建）。
+    """
+
+    CID = "莫言-案本202609071111"
+
+    def _case_dir(self, win, tmp_path, monkeypatch):
+        """造一个案的案卷目录，并把窗口的数据根指到临时目录"""
+        monkeypatch.setattr(win, "BASE_PATH", str(tmp_path))
+        d = tmp_path / "2026" / self.CID
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _fake_msgbox(self, monkeypatch, answer):
+        """假 QMessageBox：addButton 造按钮、clickedButton 返回被点的那个（与真 Qt 同语义）"""
+        import app_main as A
+
+        class FakeMsg:
+            # 代码里用到的几个类常量，真 Qt 有，假的也得有
+            Question = 'question'
+            YesRole = 'yes'
+            NoRole = 'no'
+
+            def __init__(self, *a, **k):
+                self._clicked = None
+
+            def setWindowTitle(self, *a): pass
+            def setIcon(self, *a): pass
+            def setText(self, *a): pass
+            def setInformativeText(self, *a): pass
+            def setDefaultButton(self, *a): pass
+            def exec_(self): pass
+
+            def addButton(self, text, role=None):
+                btn = object()
+                if text == answer:
+                    self._clicked = btn
+                return btn
+
+            def clickedButton(self):
+                return self._clicked
+
+        monkeypatch.setattr(A, 'QMessageBox', FakeMsg)
+
+    def test_没有旧笔录就直接放行(self, win, tmp_path, monkeypatch):
+        """不 mock 弹窗：这条同时证明「没旧笔录就不会弹」——真弹出来会卡住"""
+        monkeypatch.setattr(win, "BASE_PATH", str(tmp_path))
+        assert win._main_transcript_files(self.CID) == []
+        assert win._confirm_overwrite_main_transcript(self.CID) is True
+
+    def test_找得出基础名与副本且不误伤其它角色(self, win, tmp_path, monkeypatch):
+        import os
+        d = self._case_dir(win, tmp_path, monkeypatch)
+        for name in ("莫言本人谈话笔录.docx", "莫言本人谈话笔录(2).docx",
+                     "莫言证人谈话笔录.docx", "case.json"):
+            (d / name).write_bytes(b"x")
+
+        found = [os.path.basename(p) for p in win._main_transcript_files(self.CID)]
+        assert found == ["莫言本人谈话笔录(2).docx", "莫言本人谈话笔录.docx"], found
+
+    @pytest.mark.parametrize('answer,expect_left', [('是', 0), ('否', 2)])
+    def test_点是删掉旧的是否就一个都不动(self, win, tmp_path, monkeypatch,
+                                          answer, expect_left):
+        d = self._case_dir(win, tmp_path, monkeypatch)
+        for name in ("莫言本人谈话笔录.docx", "莫言本人谈话笔录(2).docx"):
+            (d / name).write_bytes(b"x")
+        self._fake_msgbox(monkeypatch, answer)
+
+        ok = win._confirm_overwrite_main_transcript(self.CID)
+
+        assert ok is (answer == '是')
+        assert len(win._main_transcript_files(self.CID)) == expect_left, \
+            "点「%s」之后的剩余笔录份数不对" % answer
+
+    def test_删不掉就挡住并提示(self, win, tmp_path, monkeypatch):
+        """笔录正被 Word 打开时删不掉：要提示用户并返回假，不能继续生成又堆一个"""
+        import app_main as A
+        d = self._case_dir(win, tmp_path, monkeypatch)
+        f = d / "莫言本人谈话笔录.docx"
+        f.write_bytes(b"x")
+        warned = {}
+        monkeypatch.setattr(A.QMessageBox, "warning", lambda *a, **k: warned.update(args=a))
+
+        def boom(p):
+            raise OSError("文件被占用")
+
+        monkeypatch.setattr(A.os, "remove", boom)
+        assert win._delete_main_transcripts([str(f)]) is False
+        assert warned, "删不掉必须提示用户"
+        assert f.exists(), "删不掉的文件不该被当成删掉了"
+
+    @pytest.mark.parametrize('confirm,expect', [(True, ['review', '本人']), (False, [])])
+    def test_流程_确认通过才继续(self, win, as_role, monkeypatch, confirm, expect):
+        win = as_role('本人')
+        calls = []
+        monkeypatch.setattr(win, 'open_data_review',
+                            lambda: (calls.append('review'), True)[1])
+        monkeypatch.setattr(win, '_generate_role_transcript', lambda r: calls.append(r))
+        monkeypatch.setattr(win, '_confirm_overwrite_main_transcript',
+                            lambda cid: confirm)
+        monkeypatch.setattr(win, '_set_status', lambda *a, **k: None)
+
+        win.on_talk_button_clicked()
+
+        assert calls == expect, \
+            "点「否」时连数据核对都不该跑（open_data_review 自己会写案件数据）"
+
+    @pytest.mark.parametrize('role', ['证人', '法人', '家属'])
+    def test_其它角色不弹这个确认(self, win, as_role, monkeypatch, role):
+        win = as_role(role)
+        asked = []
+        monkeypatch.setattr(win, '_confirm_overwrite_main_transcript',
+                            lambda cid: asked.append(cid) or True)
+        monkeypatch.setattr(win, 'open_data_review', lambda: True)
+        monkeypatch.setattr(win, '_generate_role_transcript', lambda r: None)
+
+        win.on_talk_button_clicked()
+
+        assert asked == [], f"{role} 不该弹「本人笔录覆盖」确认"
+
+
+# ============================================================================
+# 拟用条例以下拉框为准
+# ============================================================================
+
+class Test拟用条例以下拉框为准:
+    """改了「拟用条例」下拉框，保存与生成必须用新值。
+
+    下拉框的改动从不写回数据模型，而数据核对/材料清单原先都是「数据模型优先」——
+    于是改了下拉框，保存的、生成的、材料清单用的全是旧条例，下拉框还会被刷回旧值。
+    这是实测踩到的场景：先生成一份第（一）项笔录，改成第（六）项再生成，出来的
+    还是第（一）项，而且下拉框自己跳回第（一）项。
+    """
+
+    J1 = '第十四条第（一）项'
+    J6 = '第十四条第（六）项'
+
+    def _select(self, win, full_name_part):
+        """在下拉框里选中含某关键词的条例"""
+        for i in range(win.comboBox.count()):
+            if full_name_part in win.comboBox.itemText(i):
+                win.comboBox.setCurrentIndex(i)
+                return win.comboBox.currentText()
+        raise AssertionError('下拉框里没找到 %s' % full_name_part)
+
+    def test_改下拉框后保存用的是新条例(self, win, as_role):
+        win = as_role('本人')
+        win._apply_regulation(self.J1)              # 模拟案子里已存的是第（一）项
+        self._select(win, '第一款第六项')            # 用户改成第（六）项
+
+        data, *_ = win._collect_review_data()
+
+        assert data['regulation'] == self.J6, \
+            '数据核对会按旧条例保存（下拉框已经改成第（六）项）'
+
+    def test_改下拉框后条例不会被刷回旧值(self, win, as_role):
+        """「下拉框自动跳回第一条」那个现象：保存回写时不该把框刷回旧值"""
+        win = as_role('本人')
+        win._apply_regulation(self.J1)
+        self._select(win, '第一款第六项')
+
+        data, *_ = win._collect_review_data()
+        win._apply_regulation(data['regulation'])   # 数据核对保存后回写主界面
+
+        assert '第六项' in win.comboBox.currentText(), '下拉框被刷回旧条例了'
+        assert data['regulation'] == self.J6
+
+    def test_改下拉框后材料清单跟着变(self, win, as_role):
+        """同一个根因的另一面：材料清单的自动项也按旧条例算"""
+        win = as_role('本人')
+        win._apply_regulation(self.J1)
+        self._select(win, '第一款第六项')            # 会触发 _refresh_evidence_list
+
+        names = [m.get('name', '') for m in win.material_list.get_materials()]
+        assert '道路交通事故认定书' in names, \
+            '第（六）项该带出「道路交通事故认定书」，实际清单：%s' % names
+
+    def test_清空条例时下拉框也跟着清(self, win, as_role):
+        """加载一个没填条例的案子时，框里不该留着上一个案子的条例"""
+        win = as_role('本人')
+        win._apply_regulation(self.J1)
+        assert win.comboBox.currentText()
+
+        win._apply_regulation('')
+
+        assert win.comboBox.currentText() == '', '下拉框里残留了上一个案子的条例'
+        assert win.get_data('拟用条例', '') == ''

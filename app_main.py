@@ -1243,6 +1243,16 @@ class MainWindow(QWidget, Ui_Form):
                 )
                 return
 
+            # 本人：已生成过笔录就先问要不要覆盖。
+            # 放在数据核对之前——open_data_review 自己会把案件数据写回磁盘，先核对再问的话，
+            # 点「否」也白跑了一轮核对与保存。第一次点按钮时案本号可能还没生成，那时也不会有
+            # 旧笔录（_main_transcript_files 拿不到目录就返回空），自然放行。
+            if current_role == "本人":
+                case_id = self.current_case_id or self.lineEdit_2.text().strip()
+                if not self._confirm_overwrite_main_transcript(case_id):
+                    self._set_status('已取消', 'black')
+                    return
+
             # ── 第一步：弹出数据核对窗口，逐项核对并允许修改 ──
             if not self.open_data_review():
                 self._set_status('已取消', 'black')
@@ -1332,7 +1342,10 @@ class MainWindow(QWidget, Ui_Form):
         """从主界面与数据模型收集当前案件的全部字段（供核对窗口展示）"""
         # 本人字段以数据模型优先，避免证人/法人切换后 name_pane 串数据
         regulation_full = self.comboBox.currentText().strip()
-        regulation_short = self.get_data('拟用条例', '') or _regulation_full_to_short(regulation_full)
+        # 「拟用条例」例外：以下拉框为准。下拉框的改动不写回数据模型，数据模型里可能是
+        # 旧值——曾经因此「改了下拉框却按旧条例保存并生成」，下拉框还会被刷回旧值。
+        regulation_short = (_regulation_full_to_short(regulation_full)
+                            or self.get_data('拟用条例', ''))
 
         # 本人单位＝案件级用人单位。仅当前角色是「本人」时才采信「用人单位」控件里
         # 尚未保存的手输值——其余角色下该控件代表的是那个人自己的工作单位。
@@ -1408,13 +1421,16 @@ class MainWindow(QWidget, Ui_Form):
             combobox.setCurrentIndex(combobox.count() - 1)
 
     def _apply_regulation(self, short: str):
-        """把核对后的「拟用条例」写回下拉框与数据模型"""
+        """把「拟用条例」写回下拉框与数据模型
+
+        下拉框**总是**跟着走（包括清空）：它才是这一个字段的权威来源。原先只有
+        非空时才刷下拉框，于是加载一个没填条例的案子时，框里会留着上一个案子的条例。
+        """
         short = (short or "").strip()
         self.set_data('拟用条例', short, 'case')
         full = _regulation_short_to_full(short)
-        if full:
-            self.set_data('引用条例', full, 'case')
-            self._set_combo_or_type(self.comboBox, full)
+        self.set_data('引用条例', full, 'case')
+        self._set_combo_or_type(self.comboBox, full)
 
     def _apply_case_object(self, case_obj: Dict[str, Any]):
         """把核对后的案件 JSON 对象回写到主界面控件与数据模型"""
@@ -2154,8 +2170,9 @@ class MainWindow(QWidget, Ui_Form):
         """
         if not hasattr(self, "material_list"):
             return
-        short = (self.get_data('拟用条例', '')
-                 or _regulation_full_to_short(self.comboBox.currentText().strip()))
+        # 和 _collect_review_data 同一口径：以下拉框为准，数据模型里的可能是旧值
+        short = (_regulation_full_to_short(self.comboBox.currentText().strip())
+                 or self.get_data('拟用条例', ''))
         unit_type = (self.unit_type_combo.currentText().strip()
                      if hasattr(self, 'unit_type_combo') else DEFAULT_UNIT_TYPE)
         items = compose_evidence(short,
@@ -2694,6 +2711,66 @@ class MainWindow(QWidget, Ui_Form):
     def _on_transcript_error(self, err: str):
         logger.error(f"❌ 询问笔录生成出错: {err}")
         self._set_status('询问笔录生成出错', 'red')
+
+    def _main_transcript_files(self, case_id: str) -> List[str]:
+        """该案卷目录下已生成的本人笔录文件（基础名与 (2)(3) 副本都算）
+
+        用 _locate_case_dir 找**已存在**的目录——_case_dir 在案件还没落盘时会返回一个
+        尚不存在的新路径。各角色 label 不同（本人/证人/法人/家属谈话笔录），
+        按「本人谈话笔录」匹配不会误伤别的角色。
+        """
+        folder = self._locate_case_dir(case_id) if case_id else ''
+        if not folder or not os.path.isdir(folder):
+            return []
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            return []
+        return [os.path.join(folder, n) for n in sorted(names)
+                if n.endswith('.docx') and '本人谈话笔录' in n]
+
+    def _delete_main_transcripts(self, paths: List[str]) -> bool:
+        """删掉旧的本人笔录；有文件删不掉（例如正被 Word 打开）就返回 False 并提示"""
+        failed = []
+        for p in paths:
+            try:
+                os.remove(p)
+                print(f"🗑️ 已删除旧的本人笔录: {p}")
+            except OSError as e:
+                logger.warning("⚠️ 删除旧笔录失败 %s: %s", p, e)
+                failed.append(p)
+        if failed:
+            QMessageBox.warning(
+                self, "无法覆盖",
+                "删除旧的本人笔录失败（可能正被 Word/WPS 打开）：\n%s\n\n"
+                "请先关闭该笔录文档，再点一次「谈话笔录」。" % '\n'.join(failed))
+            return False
+        return True
+
+    def _confirm_overwrite_main_transcript(self, case_id: str) -> bool:
+        """本人笔录已存在时问一句要不要覆盖；返回 True 表示可以继续生成。
+
+        点「是」会把旧笔录（含之前累积的 (2)(3) 副本）一起删掉，随后按主界面当前
+        数据重新生成；删不掉就不继续，免得又堆一个新文件。
+        """
+        old = self._main_transcript_files(case_id)
+        if not old:
+            return True
+        msg = QMessageBox(self)
+        msg.setWindowTitle("本人笔录已存在")
+        msg.setIcon(QMessageBox.Question)
+        msg.setText("该案本号下已生成过本人谈话笔录，是否覆盖？")
+        msg.setInformativeText(
+            "点「是」会删掉旧的笔录文件（含之前生成的副本 %d 个），"
+            "然后按主界面当前数据重新生成。" % len(old))
+        yes_btn = msg.addButton("是", QMessageBox.YesRole)
+        no_btn = msg.addButton("否", QMessageBox.NoRole)
+        msg.setDefaultButton(no_btn)          # 默认落在「否」：手快回车不该把旧的删了
+        msg.exec_()
+        if msg.clickedButton() is not yes_btn:
+            logger.info("用户选择不覆盖旧的本人笔录")
+            return False
+        return self._delete_main_transcripts(old)
 
     def _save_transcript_to_template(self, case_obj: dict, content: str, role: str = '本人') -> str:
         """渲染「{role}谈话笔录（普通工伤案件）.docx」模板，把 AI 问答插入到告知程序之后，返回文件路径（失败返回空串）。
