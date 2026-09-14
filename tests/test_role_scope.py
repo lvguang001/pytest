@@ -854,3 +854,197 @@ class Test主界面布局:
         right = max(win.pushButton_ai_review.x() + win.pushButton_ai_review.width(),
                     win.pushButton.x() + win.pushButton.width())
         assert right <= 478, "左侧栏右边界是 478，按钮不能越界"
+
+
+# ============================================================================
+# 先采纳条例、再生成（条例分析的结果要在同一次生成里生效）
+# ============================================================================
+
+class Test先采纳再生成:
+    """采纳 AI 判的条例后，本次生成的提示词必须已经是新条例。
+
+    旧顺序是「先生成、后弹窗」，于是采纳完还得再点一次「谈话笔录」才能用上新条例，
+    提示词里的 {{拟用条例}}/{{法律要件}}、连带第（六）项的现住址问项、以及采纳时
+    补进材料清单的缺证据，全都是下一遍才生效。
+    """
+
+    CASE_ID = "T-先采纳再生成"
+
+    @pytest.fixture
+    def stored_case(self, win):
+        """往（临时目录里的）案件库塞一份待生成本人的案本，用完清掉"""
+        cases = win._load_cases_data()
+        cases[self.CASE_ID] = {
+            "case_id": self.CASE_ID, "name": "张三", "case_nature": "工伤案件",
+            "applicant_type": "单位申请", "proposed_article": "第十四条第（一）项",
+            "unit_type": "企业", "identity": "职工",
+            "injury_description": "张三在工地被滑落的水泥袋砸伤右脚。",
+            "materials": [{"name": "身份证复印件", "provided": True, "notes": ""}],
+        }
+        win._save_cases_data(cases)
+        yield
+        cases = win._load_cases_data()
+        cases.pop(self.CASE_ID, None)
+        win._save_cases_data(cases)
+
+    def _run(self, win, monkeypatch, analysis, case_obj):
+        """跑一遍「分析完成」，拦住弹窗与后台生成、把拼好的提示词捞出来。
+
+        analysis 模拟用户在弹窗里的选择，签名 (case_id, case_obj)；采纳要**就地**改 co。
+
+        注意 fake_analysis 必须返回传进来的那个对象、而不是 analysis 的返回值——
+        真实弹窗就是这样的（采纳靠原地修改 case_obj 生效，不靠返回值传递）。写成
+        「返回 analysis 的返回值」会掩盖「_apply_regulation_change 改成拷贝」这类错误。
+        """
+        captured = {}
+
+        def fake_analysis(cid, _res, co):
+            analysis(cid, co)
+            return co
+
+        monkeypatch.setattr(win, '_show_regulation_analysis', fake_analysis)
+        monkeypatch.setattr(win, '_start_transcript_generation',
+                            lambda role, cid, co, text: captured.update(
+                                role=role, case=co, text=text))
+        win._on_analysis_finished(self.CASE_ID, {'judged_article': '第十四条第（六）项'},
+                                 case_obj)
+        return captured
+
+    def _stored(self, win):
+        return win._load_cases_data().get(self.CASE_ID)
+
+    def test_采纳后本次生成的提示词就是新条例(self, win, stored_case, monkeypatch):
+        captured = self._run(win, monkeypatch,
+                             lambda cid, co: win._apply_regulation_change(
+                                 cid, '第十四条第（六）项', ['监控录像'], co),
+                             self._stored(win))
+
+        text = captured.get('text', '')
+        assert captured.get('role') == '本人'
+        assert '第十四条第（六）项' in text, "本次生成用的还是旧条例"
+        assert '第十四条第（一）项' not in text
+        assert '现住址' in text, "第（六）项的【补充问项】也该同一次生效"
+        assert '监控录像' in text, "采纳时补进证据清单的缺证据没进本次提示词"
+
+        # 落盘还是要发生（持久化），只是不再为了拼提示词而重读
+        on_disk = self._stored(win)
+        assert on_disk.get('proposed_article') == '第十四条第（六）项'
+        assert '监控录像' in [m.get('name') for m in on_disk.get('materials', [])]
+
+    def test_不采纳就沿用原条例(self, win, stored_case, monkeypatch):
+        # 用户在弹窗上直接关掉（一致/关闭，或点「否」）
+        captured = self._run(win, monkeypatch, lambda cid, co: None, self._stored(win))
+
+        text = captured.get('text', '')
+        assert '第十四条第（一）项' in text
+        assert '现住址' not in text
+        assert '监控录像' not in text
+
+    def test_不采纳时一次磁盘都不读(self, win, stored_case, monkeypatch):
+        """删掉的那次重读不能偷偷回来：没采纳就没有落盘，也就不该读磁盘"""
+        case_obj = self._stored(win)
+        reads = []
+        raw = win._load_cases_data
+        monkeypatch.setattr(win, '_load_cases_data', lambda: (reads.append(1), raw())[1])
+
+        self._run(win, monkeypatch, lambda cid, co: None, case_obj)
+        assert reads == [], "没采纳却读了 %d 次 cases_data.json" % len(reads)
+
+    def test_采纳时只为落盘读一次(self, win, stored_case, monkeypatch):
+        """采纳要落盘，读全量是为了写全量——这是唯一允许的读，不是为拼提示词"""
+        case_obj = self._stored(win)
+        reads = []
+        raw = win._load_cases_data
+        monkeypatch.setattr(win, '_load_cases_data', lambda: (reads.append(1), raw())[1])
+
+        self._run(win, monkeypatch,
+                  lambda cid, co: win._apply_regulation_change(
+                      cid, '第十四条第（六）项', ['监控录像'], co),
+                  case_obj)
+        assert len(reads) == 1, "采纳一次只该读 1 次（为落盘），实际 %d 次" % len(reads)
+
+
+# ============================================================================
+# 提示词里的条件块（写在 resource/prompts/*.txt，用 {% if %} 控制）
+# ============================================================================
+
+class Test模板条件块:
+    """两个条件块已从代码搬进 txt 模板，条件也交给模板——这里盯住条件本身的真值表。
+
+    块搬进模板后最容易出的错不是「抛异常」而是「条件写错 → 整块无声消失」，
+    所以本人那条走真实入口 _build_prompt_for_role 验，别的角色直接渲模板比对。
+    """
+
+    TIME_JA = '【时间核对补充要求】'
+    ADDR = '【补充问项】'
+    BOTH_TIMES = {'injury_time': '202607201620', 'visit_time': '202607201900'}
+    NO_TIMES = {'injury_time': '', 'visit_time': ''}
+    PROMPT_KEY = {'本人': 'self_send_to_ai', '证人': 'witness_send_to_ai',
+                  '法人': 'legal_send_to_ai', '家属': 'family_send_to_ai'}
+
+    def _本人(self, win, article, times):
+        case = {'case_id': 'T-条件块', 'proposed_article': article}
+        case.update(times)
+        return win._build_prompt_for_role('本人', case)
+
+    def test_第六项且时间齐_两个块都在且时间块在前(self, win):
+        out = self._本人(win, '第十四条第（六）项', self.BOTH_TIMES)
+        assert self.TIME_JA in out and self.ADDR in out
+        assert out.index(self.TIME_JA) < out.index(self.ADDR), "时间核对块应在现住址块之前"
+
+    def test_第六项但时间不齐_只留现住址块(self, win):
+        out = self._本人(win, '第十四条第（六）项', self.NO_TIMES)
+        assert self.ADDR in out and '现住址' in out
+        assert self.TIME_JA not in out
+
+    def test_第一项且时间齐_只留时间块(self, win):
+        out = self._本人(win, '第十四条第（一）项', self.BOTH_TIMES)
+        assert self.TIME_JA in out
+        assert self.ADDR not in out
+        assert '现住址' not in out
+
+    def test_第一项且时间不齐_两个块都不在(self, win):
+        out = self._本人(win, '第十四条第（一）项', self.NO_TIMES)
+        assert self.TIME_JA not in out and self.ADDR not in out
+        # 模板本身的内容完好，且提示词就止于【必问要求】最后一句，末尾不挂东西
+        for keep in ['【角色设定】', '【案件基本信息】', '【格式要求】', '【必问要求】']:
+            assert keep in out, f"模板里的 {keep} 丢了"
+        assert out.rstrip('\n').endswith('你清楚吗？'), "末尾多出了内容"
+
+    def test_只填受伤时间不算时间齐(self, win):
+        # 只填一个没法比间隔，条件要求两个都填
+        out = self._本人(win, '第十四条第（六）项',
+                         {'injury_time': '202607201620', 'visit_time': ''})
+        assert self.TIME_JA not in out
+
+    @pytest.mark.parametrize('role', ['本人', '证人', '法人', '家属'])
+    def test_四个角色都有时间核对块(self, role):
+        from app_main import render_prompt_template
+        from prompt_manager import load_prompt
+        out = render_prompt_template(load_prompt(self.PROMPT_KEY[role]),
+                                     {'受伤时间': '2026年07月20日16时20分',
+                                      '就诊时间': '2026年07月20日19时00分',
+                                      '拟用条例': '第十四条第（六）项'}, role)
+        assert self.TIME_JA in out
+
+    @pytest.mark.parametrize('role', ['证人', '法人', '家属'])
+    def test_只有本人有现住址块(self, role):
+        from app_main import render_prompt_template
+        from prompt_manager import load_prompt
+        out = render_prompt_template(load_prompt(self.PROMPT_KEY[role]),
+                                     {'受伤时间': 'T', '就诊时间': 'V',
+                                      '拟用条例': '第十四条第（六）项'}, role)
+        assert self.ADDR not in out
+        assert '现住址' not in out, f"{role} 模板里不该有现住址那一问"
+
+    def test_四份模板的if都配对(self):
+        """if/endif 数不匹配会渲染报错，先在文件层面钉住（注释里的示例不算）"""
+        import io
+        import re
+        for role in self.PROMPT_KEY:
+            path = 'resource/prompts/%s发送给AI提示词.txt' % role
+            text = io.open(path, encoding='utf-8-sig').read()
+            code = re.sub(r'\{#.*?#\}', '', text, flags=re.S)   # 去掉 {# 注释 #}
+            assert code.count('{% if ') == code.count('{% endif %}'), f'{role} 模板 if/endif 不配对'
+            assert code.count('{% if 受伤时间 and 就诊时间 %}') == 1, \
+                f'{role} 模板的时间核对块条件缺失或重复'

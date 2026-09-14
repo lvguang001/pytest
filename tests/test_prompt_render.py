@@ -76,8 +76,10 @@ class TestRenderPromptTemplate:
         assert out == 'A：甲\n'
 
     def test_CRLF模板也能删行(self):
+        # 生产路径上 load_prompt 已把 CRLF 归一成 LF，所以这里不要求保住 CRLF，
+        # 只要求 CRLF 模板不会让删行失效
         out = render_prompt_template('A：{{a}}\r\nB：{{b}}\r\n', {'a': '甲', 'b': ''})
-        assert out == 'A：甲\r\n'
+        assert out == 'A：甲\n'
 
     def test_空值占位符在句中时只替成空串不吃掉整句(self):
         tpl = '本案申请类型为 {{申请类型}}，请据此设计问题。\n'
@@ -107,4 +109,46 @@ class TestRenderPromptTemplate:
         with caplog.at_level(logging.WARNING):
             out = render_prompt_template('- 姓名：{{本人姓名}}', {}, '本人')
         assert out == '- 姓名：{{本人姓名}}'
+        assert any('本人姓名' in r.message for r in caplog.records)
+
+
+class Test条件块:
+    """`{% if %}` 让模板自己决定整块要不要——条件块不再由代码拼接"""
+
+    def test_条件为真保留整块(self):
+        tpl = '头\n{% if 就诊时间 %}\n【补充】\n内容\n{% endif %}\n尾'
+        out = render_prompt_template(tpl, {'就诊时间': '2026年07月20日19时00分'})
+        assert out == '头\n【补充】\n内容\n尾'      # {% if %} 那行自己消失，不留空行
+
+    def test_条件为假整块消失且不留空行(self):
+        tpl = '头\n{% if 就诊时间 %}\n【补充】\n内容\n{% endif %}\n尾'
+        out = render_prompt_template(tpl, {'就诊时间': ''})
+        assert out == '头\n尾'
+        assert '【补充】' not in out
+        assert '\n\n' not in out
+
+    def test_两个条件块各自独立(self):
+        tpl = ('尾\n{% if a %}\n\n【A】\na体\n{% endif %}'
+               "{% if b %}\n\n【B】\nb体\n{% endif %}")
+        assert '【A】' in render_prompt_template(tpl, {'a': 1, 'b': 1})
+        assert '【A】' in render_prompt_template(tpl, {'a': 1, 'b': ''})
+        assert '【B】' in render_prompt_template(tpl, {'a': '', 'b': 1})
+        assert render_prompt_template(tpl, {'a': '', 'b': ''}) == '尾\n'
+
+    def test_条件里变量名写错要报错而不是静默为假(self):
+        """条件写错名字若静默当假，整块提示词会无声消失——宁可当场失败"""
+        import pytest
+        from jinja2 import UndefinedError
+        with pytest.raises(UndefinedError):
+            render_prompt_template('{% if 拼错的键 %}块{% endif %}', {'对的名字': 1})
+
+    def test_注释不会进输出(self):
+        tpl = '头\n{# 这是给人看的注释 #}\n尾'
+        assert render_prompt_template(tpl, {}) == '头\n尾'
+
+    def test_输出位置的未填占位符仍原样保留(self, caplog):
+        # 与条件位置相反：输出位置没给值，要留着 {{}} 并告警，不能渲染成 ""
+        with caplog.at_level(logging.WARNING):
+            out = render_prompt_template('{% if x %}A{% endif %}- 姓名：{{本人姓名}}', {'x': 1})
+        assert '{{本人姓名}}' in out
         assert any('本人姓名' in r.message for r in caplog.records)

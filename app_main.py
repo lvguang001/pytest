@@ -7,6 +7,7 @@ import logging
 from typing import Dict, List, Any, Tuple, Optional
 from ctypes import windll, byref, create_string_buffer, c_int32, c_uint
 import pandas as pd
+from jinja2 import Environment, StrictUndefined
 from docx import Document
 from docxtpl import DocxTemplate
 from PyQt5.Qt import *
@@ -275,31 +276,58 @@ def format_compact_time(value: str) -> str:
     return (f"{s[0:4]}年{s[4:6]}月{s[6:8]}日{s[8:10]}时{s[10:12]}分")
 
 
-def render_prompt_template(template: str, data: Dict[str, Any], label: str = '') -> str:
-    """按 data 逐个替换 {{key}} 占位符。
+class _PromptUndefined(StrictUndefined):
+    """提示词里没拿到值的占位符。
 
-    值为空串的占位符：在**原模板**上把它独占的那一行（形如「- 标签：{{占位符}}」）
-    连换行一起删掉——否则提示词里会留下「- 称谓提示：」这种只有标签、没有内容的
-    空壳行。删行只认原模板的形状（该占位符独占一行），与别的 key 取什么值、
-    data 的遍历顺序都无关；行内的占位符为空时只替成空串，不会吃掉半句话。
-
-    替换后仍有残留 {{…}} 则告警（防止模板加了新占位符而代码未填）。
+    输出位置（`{{某某}}`）原样渲染成 `{{某某}}`——跟以前一样留在提示词里，并触发
+    残留占位符告警，好一眼看出「模板加了占位符但代码没填」。
+    但用在 `{% if %}` / `{% for %}` 里会直接报错：条件里把变量名写错，宁可当场失败，
+    也不要静默当成空/假、让整块提示词悄悄消失。
     """
-    # 第一遍：空值占位符独占的整行删掉
+
+    def __str__(self):
+        return '{{%s}}' % self._undefined_name
+
+
+# 提示词模板引擎。trim_blocks + lstrip_blocks：{% if %} 独占一行时连那行一起消失，
+# 不做这两项会留下空行。autoescape 关掉（纯文本，不是 HTML）。
+_PROMPT_ENV = Environment(
+    undefined=_PromptUndefined,
+    autoescape=False,
+    trim_blocks=True,
+    lstrip_blocks=True,
+    keep_trailing_newline=True,
+    # 用默认的 newline_sequence='\n'：提示词文件虽是 CRLF，但 load_prompt 以文本模式读，
+    # CRLF 已被 Python 归一成 LF，渲染结果也就该是 LF（跟改造前 str.replace 一致）。
+)
+
+
+def render_prompt_template(template: str, data: Dict[str, Any], label: str = '') -> str:
+    """渲染提示词模板：`{{key}}` 填值，`{% if %}` 按条件决定整块要不要。
+
+    值为空串、且占位符独占一行（形如「- 标签：{{占位符}}」）时，整行删掉——否则会留下
+    「- 称谓提示：」这种只有标签、没有内容的空壳行。删行只认原模板的形状（该占位符独占
+    一行），与别的 key 取什么值、data 的遍历顺序都无关；行内的占位符为空时只替成空串。
+
+    值为 None 表示「代码没给这个 key 填值」：不喂给引擎，于是它在输出位置保持
+    `{{key}}` 原样并告警（而不是渲染成字符串 "None"）。
+
+    渲染后仍有残留 {{…}} 则告警（防止模板加了新占位符而代码未填）。
+    """
+    # 第一遍：空值占位符独占的整行删掉（在原模板上做，与遍历顺序无关）
     for key, val in data.items():
         if val is None or str(val) != '':
             continue
         token = '{{%s}}' % key
         template = re.sub(r'^[^\n{}]*' + re.escape(token) + r'[ \t]*(?:\r?\n|$)',
                           '', template, flags=re.M)
-    # 第二遍：其余占位符统一替换（空值但没独占一行的，就替成空串）
-    for key, val in data.items():
-        if val is not None:
-            template = template.replace('{{%s}}' % key, str(val))
-    leftovers = sorted(set(re.findall(r'\{\{([^}]*)\}\}', template)))
+    # 第二遍：交给模板引擎（None 的键不提供，让它按「未填」处理）
+    provided = {k: v for k, v in data.items() if v is not None}
+    rendered = _PROMPT_ENV.from_string(template).render(**provided)
+    leftovers = sorted(set(re.findall(r'\{\{([^}]*)\}\}', rendered)))
     if leftovers:
         logger.warning(f"⚠️ 提示词「{label}」仍有未替换占位符: {leftovers}")
-    return template
+    return rendered
 
 
 # ============================================================================
@@ -320,6 +348,8 @@ def _regulation_elements(short: str) -> list:
     if not short:
         return []
     return list(REGULATION_ELEMENTS.get(short.strip(), []))
+
+
 
 
 # ============================================================================
@@ -2531,22 +2561,23 @@ class MainWindow(QWidget, Ui_Form):
 
         self.analysis_worker = RegulationAnalyzeWorker(self.ai_service, case_obj)
         self.analysis_worker.finished.connect(
-            lambda result: self._on_analysis_finished(case_id, result)
+            lambda result: self._on_analysis_finished(case_id, result, case_obj)
         )
         self.analysis_worker.error.connect(self._on_analysis_error)
         self.analysis_worker.start()
 
-    def _on_analysis_finished(self, case_id: str, result: dict):
+    def _on_analysis_finished(self, case_id: str, result: dict, case_obj: dict):
         self._set_status('AI分析完成', 'green')
         if '错误' in result:
             QMessageBox.warning(self, "AI分析失败", result.get('错误', '未知错误'))
             return
-        # AI 分析完成后，用统一「本人发送给AI提示词」（txt）生成询问笔录，不再用 docx 当提示词
-        case_obj = self._load_cases_data().get(case_id)
-        if case_obj:
-            prompt_text = self._build_prompt_for_role('本人', case_obj)
-            self._start_transcript_generation('本人', case_id, case_obj, prompt_text)
-        self._show_regulation_analysis(case_id, result)
+        # 先给你看分析结果、决定要不要采纳 AI 判的条例——采纳就当场改这个 case_obj（并落盘）。
+        # 弹窗是模态的，返回时采纳已经生效；然后直接拿它拼提示词，本次生成就用上新条例，
+        # 既不用「先采纳、再重新点一次谈话笔录」，也不用「落盘 → 再读回来」。
+        case_obj = self._show_regulation_analysis(case_id, result, case_obj)
+        # 用统一「本人发送给AI提示词」（txt）生成询问笔录，不再用 docx 当提示词
+        prompt_text = self._build_prompt_for_role('本人', case_obj)
+        self._start_transcript_generation('本人', case_id, case_obj, prompt_text)
 
     def _start_transcript_generation(self, role: str, case_id: str, case_obj: dict, prompt_text: str):
         """统一的笔录生成启动（本人/证人/法人共用一条代码路径）：txt 提示词 → AI 后台线程"""
@@ -2654,32 +2685,16 @@ class MainWindow(QWidget, Ui_Form):
             case_obj.get('identity', DEFAULT_IDENTITY), '本人')
         return base
 
-    def _time_check_instruction(self, case_obj: dict) -> str:
-        """生成笔录时的时间核对要求：
-        受伤时间 与 就诊时间 间隔明显不合理 → 请 AI 追加一问解释延迟就诊。
-
-        两个时间都填了才追加（只填一个没法比间隔）。本人提示词里已有这两行，
-        证人/法人/家属没有，故这里把两个时间都写进句子，四个角色都自洽。
-        """
-        injury = format_compact_time(case_obj.get('injury_time', ''))
-        visit = format_compact_time(case_obj.get('visit_time', ''))
-        if not (injury and visit):
-            return ""
-        return (f"本案填写的受伤时间为：{injury}，就诊时间为：{visit}。"
-                f"请判断受伤后是否在合理时间内就医：若受伤时间与就诊时间相隔明显不合理"
-                f"（如受伤后过了较长时间才就诊且无正当理由），请在笔录问答中加入一问，"
-                f"请被询问人解释延迟就诊的原因；若间隔合理则无需就此提问。")
-
     def _build_prompt_for_role(self, role: str, case_obj: dict) -> str:
-        """按角色返回发给 AI 的 txt 提示词（ROLE_TALK 定 key，统一渲染并校验残留占位符）"""
+        """按角色返回发给 AI 的 txt 提示词（ROLE_TALK 定 key，统一渲染并校验残留占位符）
+
+        条件块（时间核对、第（六）项问现住址）已写进各自的 txt 模板，用 `{% if %}` 控制，
+        代码这边只负责填数据——要改措辞或加减条件，改 resource/prompts/ 下的 txt 即可。
+        """
         from prompt_manager import load_prompt
         meta = ROLE_TALK.get(role, ROLE_TALK['本人'])
         prompt = load_prompt(meta['ai_prompt'])
-        prompt = render_prompt_template(prompt, self._prompt_fill_data(role, case_obj), role)
-        time_extra = self._time_check_instruction(case_obj)
-        if time_extra:
-            prompt += "\n\n【时间核对补充要求】\n" + time_extra
-        return prompt
+        return render_prompt_template(prompt, self._prompt_fill_data(role, case_obj), role)
 
     def _generate_role_transcript(self, role: str):
         """统一的谈话笔录生成入口（证人/法人由此进入；本人经条例分析后直接调 _start_transcript_generation）"""
@@ -2903,13 +2918,17 @@ class MainWindow(QWidget, Ui_Form):
         self._set_status('AI分析出错', 'red')
         QMessageBox.critical(self, "AI分析错误", f"分析出错: {err}")
 
-    def _show_regulation_analysis(self, case_id: str, result: dict):
+    def _show_regulation_analysis(self, case_id: str, result: dict, case_obj: dict) -> dict:
+        """弹窗展示分析结果；若采纳 AI 判的条例，就当场改 case_obj 并落盘。
+
+        返回 case_obj：采纳过是改好的那一份，没采纳是原样——调用方直接拿去拼提示词。
+        """
         judged = result.get('judged_article', '')
         judged_reason = result.get('judged_article_reason', '')
         missing = result.get('missing_evidence', []) or []
         consistency = result.get('consistency', '')
         reason = result.get('reason', '')
-        proposed = self._load_cases_data().get(case_id, {}).get('proposed_article', '')
+        proposed = case_obj.get('proposed_article', '')
 
         dlg = QDialog(self)
         dlg.setWindowTitle("AI 条例分析结果")
@@ -2955,13 +2974,15 @@ class MainWindow(QWidget, Ui_Form):
             btn_layout.addWidget(q)
             btn_layout.addStretch()
             no_btn = QPushButton("否")
-            no_btn.clicked.connect(lambda: self._on_regulation_choice(False, dlg, case_id, judged, missing))
+            no_btn.clicked.connect(lambda: self._on_regulation_choice(
+                False, dlg, case_id, judged, missing, case_obj))
             btn_layout.addWidget(no_btn)
             yes_btn = QPushButton("是")
             yes_btn.setStyleSheet(
                 "QPushButton{background-color:#27ae60;color:white;font-weight:bold;padding:5px 22px;border-radius:4px;}"
             )
-            yes_btn.clicked.connect(lambda: self._on_regulation_choice(True, dlg, case_id, judged, missing))
+            yes_btn.clicked.connect(lambda: self._on_regulation_choice(
+                True, dlg, case_id, judged, missing, case_obj))
             btn_layout.addWidget(yes_btn)
         else:
             btn_layout.addStretch()
@@ -2971,37 +2992,46 @@ class MainWindow(QWidget, Ui_Form):
 
         layout.addLayout(btn_layout)
         dlg.exec_()
+        return case_obj
 
-    def _on_regulation_choice(self, yes: bool, dlg: QDialog, case_id: str, judged: str, missing: list):
+    def _on_regulation_choice(self, yes: bool, dlg: QDialog, case_id: str, judged: str,
+                              missing: list, case_obj: dict):
         dlg.accept()
         if yes:
-            self._apply_regulation_change(case_id, judged, missing)
+            self._apply_regulation_change(case_id, judged, missing, case_obj)
             QMessageBox.information(self, "已修改", f"拟用条例已修改为：{judged}\n关键证据清单已相应更新。")
         else:
             self._set_status('已保留原拟用条例', 'black')
 
-    def _apply_regulation_change(self, case_id: str, judged_article: str, missing_evidence: list):
-        """把拟用条例修改为 AI 判断的条例，并同步界面 + JSON + 证据清单"""
+    def _apply_regulation_change(self, case_id: str, judged_article: str,
+                                 missing_evidence: list, case_obj: dict) -> dict:
+        """把拟用条例改成 AI 判的条例，同步界面 + 证据清单，并落盘；返回同一个 case_obj。
+
+        就地改传进来的对象（调用方手里那份），提示词随后直接拿它拼——不必「落盘再读回来」，
+        落盘只为持久化。以前是「先落盘、后更新证据清单、再重读」，刚补进清单的证据读不回来。
+        """
         # 1. 主界面条例下拉框 + 数据模型
         self._apply_regulation(judged_article)
-        # 2. JSON 里的 proposed_article
-        cases = self._load_cases_data()
-        case_obj = cases.get(case_id)
-        if case_obj:
-            case_obj['proposed_article'] = judged_article
-            case_obj['proposed_article_elements'] = _regulation_elements(judged_article)
-            self._save_cases_data(cases)
-        # 3. 更新关键证据清单：把缺失证据作为未勾选项补进材料清单
+        # 2. 改内存里的案件对象
+        case_obj['proposed_article'] = judged_article
+        case_obj['proposed_article_elements'] = _regulation_elements(judged_article)
+        # 3. 关键证据清单：把缺失证据作为未勾选项补进材料清单，并写进同一个对象
         if missing_evidence and hasattr(self, 'material_list'):
-            current = self.material_list.get_materials()
-            existing = {m.get('name', '') for m in current}
+            materials = self.material_list.get_materials()
+            existing = {m.get('name', '') for m in materials}
             for ev in missing_evidence:
                 if ev and ev not in existing:
-                    current.append({"name": ev, "provided": False, "notes": ""})
+                    materials.append({"name": ev, "provided": False, "notes": ""})
                     existing.add(ev)
-            self.material_list.set_materials(current)
-            self.data_model.investigation['本人材料'] = current
+            self.material_list.set_materials(materials)
+            self.data_model.investigation['本人材料'] = materials
+            case_obj['materials'] = materials
+        # 4. 落盘（为写全量而读全量，与拼提示词无关）
+        cases = self._load_cases_data()
+        cases[case_id] = case_obj
+        self._save_cases_data(cases)
         self._set_status(f'拟用条例已修改为：{judged_article}', 'green')
+        return case_obj
 
     # ========================================================================
     # F2 测试数据轮换
