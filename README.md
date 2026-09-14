@@ -36,7 +36,7 @@ python -m pytest
 | `app_main.py` | 5193 | 主窗口与全部业务逻辑（**占全项目 62%**） |
 | `ui_main_window.py` | 209 | Qt Designer 生成的界面定义（仓库内无 `.ui` 源文件，它就是唯一来源） |
 | `main.py` | 210 | 程序入口、用户/API 配置管理、控制台编码修正 |
-| `ai_service.py` | 475 | DeepSeek API 调用（提取文本、条例分析、笔录生成） |
+| `ai_service.py` | 475 | DeepSeek API 调用（提取文本、笔录生成、受伤经过/审批表等文书分析） |
 | `prompt_manager.py` | 426 | 提示词外置管理，读写 `resource/prompts/*.txt` |
 | `case_classifier.py` | 68 | 条例目录与法律要件 |
 | `services.py` | 193 | 文件/数据服务和模板变量管理 |

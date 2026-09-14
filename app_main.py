@@ -165,8 +165,12 @@ _TOP_LEVEL_KEYS = ("case_id",)
 # 当前磁盘结构版本。读到更高版本时说明是更新版程序写的，不能静默按旧结构处理。
 SCHEMA_VERSION = "3.0"
 
+# 案件数据的磁盘布局：一案一文件，<BASE_PATH>/<案本号>/case.json（与生成的文书同处一个案卷文件夹）
+_CASE_FILE_NAME = "case.json"
+_LEGACY_CASES_FILE = "cases_data.json"      # 旧版「一个全库文件」，仅迁移时读
+
 # 保存前的备份层
-_BACKUP_DIR = "backups"        # 每日快照目录（与 cases_data.json 同级）
+_BACKUP_DIR = "backups"        # 每日快照目录（与案件目录同级）
 _SNAPSHOT_KEEP = 30            # 每日快照保留份数
 
 
@@ -559,194 +563,27 @@ def _to_full_materials(provided_materials):
 # F2 测试数据预设（按 F2 轮换）
 # ============================================================================
 
-TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(张三)',
+# F2 循环键。目前只留一条（本人·莫言）用于试生成笔录；原先的
+# 工亡/证人/法人/机关公务员/事业单位几条预设已按需删除，需要时从 git 历史取回。
+TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(莫言)',
   'role': '本人',
   'deathCaseCheckbox': False,
   'personalApplicationCheckbox': False,
-  'name_pane': '张三',
+  'name_pane': '莫言',
   'idnumer_pane': '330324199003151234',
   'textEdit': '浙江省永嘉县瓯北街道XX路88号',
   'lineEdit_4': '13888880001',
   'lineEdit_5': '泥水工',
-  'injured_worker': '张三',
+  'injured_worker': '莫言',
   'regulation': '第十四条第（一）项',
   'company_pane': '温州YY建筑劳务有限公司',
   'construction_company': '永嘉县XX建设工程有限公司',
   'construction_plant': 'ZZ新城项目一期工地',
-  'statement_edit': '我单位职工张三，男，1990年3月15日出生，身份证号330324199003151234。2026年7月20日16时20分许，张三在工地3号楼5层搬运水泥时被滑落的水泥袋砸伤右脚，诊断为右足跖骨骨折。属工作时间工作场所因工作原因受伤，单位申请认定工伤。',
+  'statement_edit': '我单位职工莫言，男，1990年3月15日出生，身份证号330324199003151234。2026年7月20日16时20分许，莫言在工地3号楼5层搬运水泥时被滑落的水泥袋砸伤右脚，诊断为右足跖骨骨折。属工作时间工作场所因工作原因受伤，单位申请认定工伤。',
   'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
                 {'name': '医院诊断证明书', 'provided': True, 'notes': '右足跖骨骨折'},
                 {'name': '劳动合同', 'provided': True, 'notes': ''},
-                {'name': '考勤记录', 'provided': False, 'notes': ''}]},
- {'name': '个人申请×工伤 本人(刘大)',
-  'role': '本人',
-  'deathCaseCheckbox': False,
-  'personalApplicationCheckbox': True,
-  'name_pane': '刘大',
-  'idnumer_pane': '330324199205151111',
-  'textEdit': '浙江省永嘉县桥下镇YY村6号',
-  'lineEdit_4': '13900001111',
-  'lineEdit_5': '钢筋工',
-  'injured_worker': '刘大',
-  'regulation': '第十四条第（一）项',
-  'company_pane': '温州YY建筑劳务有限公司',
-  'construction_company': '永嘉县XX建设工程有限公司',
-  'construction_plant': 'ZZ新城项目一期工地',
-  'statement_edit': '我叫刘大，男，1992年5月15日出生，身份证号330324199205151111。2026年7月20日在工地扎钢筋时被坠落钢管砸伤右手。单位至今未为我申请工伤认定，我作为受伤职工本人自行申请认定工伤，请核实我与单位劳动关系（未签合同、有考勤和工资记录）及参保情况。',
-  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
-                {'name': '医院诊断证明书', 'provided': True, 'notes': '右手骨折'},
-                {'name': '工资银行流水', 'provided': True, 'notes': ''},
-                {'name': '考勤记录', 'provided': True, 'notes': ''}]},
- {'name': '单位申请×死亡 家属(死者王五)',
-  'role': '家属',
-  'deathCaseCheckbox': True,
-  'personalApplicationCheckbox': False,
-  'name_pane': '王母',
-  'idnumer_pane': '330324195003016666',
-  'textEdit': '浙江省永嘉县上塘镇AA村12号',
-  'lineEdit_4': '13700002222',
-  'lineEdit_5': '',            # 家属自己的岗位（无单位 → 留空）
-  'identity': '母子',          # 家属这一栏＝与死者关系
-  'injured_worker': '王五',
-  'regulation': '第十五条第（一）项',
-  'company_pane': '',          # 家属无单位 → 岗位一并留空
-  'construction_company': '永嘉县XX建设工程有限公司',
-  'construction_plant': 'ZZ新城项目一期工地',
-  'statement_edit': '我单位职工王五，男，1975年1月1日出生。2026年8月2日上午在工地工作时突发疾病，经送医抢救无效于当日18时死亡（诊断：心源性猝死）。单位拟申请认定工亡，故由我单位作为申请人。',
-  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
-                {'name': '死亡证明', 'provided': True, 'notes': ''},
-                {'name': '抢救病历', 'provided': True, 'notes': '心源性猝死'},
-                {'name': '劳动合同', 'provided': True, 'notes': ''}]},
- {'name': '个人申请×死亡 家属(死者赵六)',
-  'role': '家属',
-  'deathCaseCheckbox': True,
-  'personalApplicationCheckbox': True,
-  'name_pane': '赵妻',
-  'idnumer_pane': '330324198511223333',
-  'textEdit': '浙江省永嘉县黄田街道CC路3号',
-  'lineEdit_4': '13600003333',
-  'lineEdit_5': '缝纫工',      # 家属自己的岗位
-  'identity': '夫妻',          # 家属这一栏＝与死者关系
-  'injured_worker': '赵六',
-  'regulation': '第十五条第（一）项',
-  'company_pane': '温州XX服装有限公司',   # 家属自己的工作单位（独立于死者单位）
-  'construction_company': '永嘉县XX建设工程有限公司',
-  'construction_plant': 'ZZ新城项目一期工地',
-  'statement_edit': '我丈夫赵六，男，1981年11月22日出生。2026年8月2日在工地作业时突发疾病，送医抢救无效于当日18时死亡。单位未及时申报，我作为死者近亲属（配偶）自行申请认定工亡，请核实劳动关系、参保及单位是否未及时申报情况。',
-  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
-                {'name': '死亡证明', 'provided': True, 'notes': ''},
-                {'name': '结婚证', 'provided': True, 'notes': '近亲属关系'},
-                {'name': '工资银行流水', 'provided': True, 'notes': ''}]},
- {'name': '单位申请×工伤 证人(李四/张三)',
-  'role': '证人',
-  'deathCaseCheckbox': False,
-  'personalApplicationCheckbox': False,
-  'name_pane': '李四',
-  'idnumer_pane': '330324198608155555',
-  'textEdit': '浙江省永嘉县瓯北街道DD路9号',
-  'lineEdit_4': '13500004444',
-  'lineEdit_5': '钢筋工',
-  'injured_worker': '张三',
-  'regulation': '第十四条第（一）项',
-  'company_pane': '温州YY建筑劳务有限公司',
-  'construction_company': '永嘉县XX建设工程有限公司',
-  'construction_plant': 'ZZ新城项目一期工地',
-  'statement_edit': '我单位职工张三于2026年7月20日在工地受伤，单位申请认定工伤。',
-  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
-                {'name': '劳动合同', 'provided': True, 'notes': ''}]},
- {'name': '个人申请×工伤 证人(钱七/刘大)',
-  'role': '证人',
-  'deathCaseCheckbox': False,
-  'personalApplicationCheckbox': True,
-  'name_pane': '钱七',
-  'idnumer_pane': '330324199009167777',
-  'textEdit': '浙江省永嘉县乌牛街道EE弄5号',
-  'lineEdit_4': '13400005555',
-  'lineEdit_5': '泥水工',
-  'injured_worker': '刘大',
-  'regulation': '第十四条第（一）项',
-  'company_pane': '温州YY建筑劳务有限公司',
-  'construction_company': '永嘉县XX建设工程有限公司',
-  'construction_plant': 'ZZ新城项目一期工地',
-  'statement_edit': '刘大于2026年7月20日在工地受伤后自行申请认定工伤，我作为工友可佐证其考勤与受伤经过。',
-  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
-                {'name': '劳动合同', 'provided': False, 'notes': ''}]},
- {'name': '个人申请×工伤 证人·其它单位(孙七/刘大)',
-  'role': '证人',
-  'deathCaseCheckbox': False,
-  'personalApplicationCheckbox': True,
-  'name_pane': '孙七',
-  'idnumer_pane': '330324199312058888',
-  'textEdit': '浙江省永嘉县三江街道GG路7号',
-  'lineEdit_4': '13200007777',
-  'lineEdit_5': '送货员',            # 证人自己的岗位
-  'identity': '职工',
-  'injured_worker': '刘大',
-  'regulation': '第十四条第（一）项',
-  'company_pane': '永嘉ZZ物流有限公司',   # 证人来自其它单位，与案件用人单位不同
-  'construction_company': '永嘉县XX建设工程有限公司',
-  'construction_plant': 'ZZ新城项目一期工地',
-  'statement_edit': '我是给该工地送货的，2026年7月20日送货时目睹刘大被坠落钢管砸伤右手，可以佐证他的受伤经过。',
-  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''}]},
- {'name': '单位申请×工伤 法人(王老板/张三)',
-  'role': '法人',
-  'deathCaseCheckbox': False,
-  'personalApplicationCheckbox': False,
-  'name_pane': '王老板',
-  'idnumer_pane': '330324197005203333',
-  'textEdit': '浙江省永嘉县瓯北街道FF路20号',
-  'lineEdit_4': '13300006666',
-  'lineEdit_5': '总经理',            # 法人这一栏＝职务
-  'identity': '法定代表人',          # 法人这一栏＝身份
-  'injured_worker': '张三',
-  'regulation': '第十四条第（一）项',
-  'company_pane': '温州YY建筑劳务有限公司',
-  'construction_company': '永嘉县XX建设工程有限公司',
-  'construction_plant': 'ZZ新城项目一期工地',
-  'statement_edit': '我单位职工张三于2026年7月20日在工地受伤，单位申请认定工伤。',
-  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
-                {'name': '营业执照', 'provided': True, 'notes': ''},
-                {'name': '法定代表人身份证明', 'provided': True, 'notes': ''}]},
- {'name': '机关公务员×工伤 本人(孙某)',
-  'role': '本人',
-  'deathCaseCheckbox': False,
-  'personalApplicationCheckbox': False,
-  'unit_type': '机关（公务员）',
-  'identity': '公务员',
-  'name_pane': '孙某',
-  'idnumer_pane': '330301198812126666',
-  'textEdit': '浙江省温州市鹿城区XX路1号',
-  'lineEdit_4': '13811112222',
-  'lineEdit_5': '行政审批窗口岗位',
-  'injured_worker': '孙某',
-  'regulation': '第十四条第（一）项',
-  'company_pane': '温州市XX局',
-  'construction_company': '',
-  'construction_plant': '',
-  'statement_edit': '本机关（公务员）工作人员孙某，男，1988年12月12日出生，身份证号330301198812126666。2026年8月18日在办公场所处理公务途中下楼时踩空致右踝扭伤，属工作时间工作场所因工作原因受伤，单位（本机关）申请认定工伤。',
-  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
-                {'name': '医院诊断证明书', 'provided': True, 'notes': '右踝扭伤'},
-                {'name': '公务员录用/在编证明', 'provided': True, 'notes': ''}]},
- {'name': '事业单位×工伤 本人(周某)',
-  'role': '本人',
-  'deathCaseCheckbox': False,
-  'personalApplicationCheckbox': False,
-  'unit_type': '事业单位',
-  'identity': '事业编制工作人员',
-  'name_pane': '周某',
-  'idnumer_pane': '330301198901018888',
-  'textEdit': '浙江省温州市龙湾区YY路9号',
-  'lineEdit_4': '13822223333',
-  'lineEdit_5': '专技岗位',
-  'injured_worker': '周某',
-  'regulation': '第十四条第（一）项',
-  'company_pane': '温州市XX检验检测中心',
-  'construction_company': '',
-  'construction_plant': '',
-  'statement_edit': '本单位（事业单位）工作人员周某，女，1989年1月1日出生，身份证号330301198901018888。2026年8月20日在实验室内搬运检测设备时被坠落的机箱砸伤左肩，属工作时间工作场所因工作原因受伤，单位申请认定工伤。',
-  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
-                {'name': '医院诊断证明书', 'provided': True, 'notes': '左肩软组织挫伤'},
-                {'name': '在编证明', 'provided': True, 'notes': ''}]}]
+                {'name': '考勤记录', 'provided': False, 'notes': ''}]}]
 
 
 # ============================================================================
@@ -779,23 +616,6 @@ class AIWorker(QThread):
             self.progress.emit("分析完成，正在生成报告...", 90)
             self.finished.emit(result)
 
-        except Exception as e:
-            self.error.emit(str(e))
-
-class RegulationAnalyzeWorker(QThread):
-    """条例判断 + 证据分析 的 AI 工作线程"""
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
-
-    def __init__(self, ai_service, case_obj):
-        super().__init__()
-        self.ai_service = ai_service
-        self.case_obj = case_obj
-
-    def run(self):
-        try:
-            result = self.ai_service.analyze_case_for_regulation(self.case_obj)
-            self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -1433,21 +1253,21 @@ class MainWindow(QWidget, Ui_Form):
             if role == "证人":
                 # 数据核对会把表单回填成本人数据，这里把表单切回当前证人显示
                 self._sync_current_witness_to_form()
-                # 证人：跳过条例分析，直接生成证人谈话笔录
+                # 证人：直接生成证人谈话笔录
                 self._generate_role_transcript('证人')
             elif role == "法人":
                 # 数据核对会把表单回填成本人数据，这里把表单切回法人显示
                 self._sync_legal_to_form()
-                # 法人：跳过条例分析，直接生成法人谈话笔录
+                # 法人：直接生成法人谈话笔录
                 self._generate_role_transcript('法人')
             elif role == "家属":
                 # 数据核对会把表单回填成本人数据，这里把表单切回家属显示
                 self._sync_family_to_form()
-                # 家属：跳过条例分析，直接生成家属谈话笔录（工亡案）
+                # 家属：直接生成家属谈话笔录（工亡案）
                 self._generate_role_transcript('家属')
             else:
-                # 本人：AI 条例判断 + 证据分析（分析完成后走同一 txt 提示词生成）
-                self._analyze_case_with_ai(self.current_case_id)
+                # 本人：与其他角色同一条路——直接拼提示词生成（不再先跑一次条例判断）
+                self._generate_role_transcript('本人')
         except Exception as e:
             print(f"谈话笔录按钮点击异常: {e}")
             import traceback
@@ -1698,34 +1518,124 @@ class MainWindow(QWidget, Ui_Form):
     # 案件 JSON 持久化（案本号为键）
     # ========================================================================
 
-    def _cases_data_path(self) -> str:
-        """案件数据 JSON 文件路径"""
-        return os.path.join(self.BASE_PATH, 'cases_data.json')
+    # ---- 案件数据的磁盘布局：一案一文件 ----
+    # 每个案件的数据是 <BASE_PATH>/<案本号>/case.json，与它生成的文书同处一个案卷文件夹，
+    # 而不是全部挤在一个 cases_data.json 里。好处：某个案件的文件坏了只影响它自己；
+    # 数据跟着案卷走，删/拷一个案卷就是删/拷一个案件。
+
+    def _legacy_cases_path(self) -> str:
+        """旧版「一个全库文件」的路径（只在迁移时用到）"""
+        return os.path.join(self.BASE_PATH, _LEGACY_CASES_FILE)
+
+    @staticmethod
+    def _safe_case_dirname(case_id: str) -> str:
+        """案本号 → 可当 Windows 目录名：换掉非法字符、去掉首尾的点和空格；空了给个占位名"""
+        name = re.sub(r'[\\/:*?"<>|\r\n\t]', '_', str(case_id or '')).strip(' .')
+        return name or '未命名案件'
+
+    @staticmethod
+    def _year_for_case(case_id: str) -> str:
+        """归档年份：优先取案本号里的立案日期（那本来就是立案时的系统时间），
+        取不到再用当前系统年份。"""
+        text = str(case_id or '')
+        m = (re.search(r'(?:案本|工亡)(20\d{2})\d{4}', text)
+             or re.search(r'(20\d{2})\d{2}\d{2}', text))
+        return m.group(1) if m else str(datetime.datetime.now().year)
+
+    def _locate_case_dir(self, case_id: str) -> str:
+        """找已存在的案卷目录，找不到返回空串。
+
+        两种布局都认：<BASE>/<年份>/<案本号>（分年份之后）与 <BASE>/<案本号>
+        （分年份之前存的）。老案卷命中后**留在原地**——搬它就会把同处一处的
+        文书和数据分开，也会让用户以为文件丢了。
+        """
+        name = self._safe_case_dirname(case_id)
+        plain = os.path.join(self.BASE_PATH, name)
+        if os.path.isdir(plain):
+            return plain
+        try:
+            for entry in sorted(os.listdir(self.BASE_PATH)):
+                cand = os.path.join(self.BASE_PATH, entry, name)
+                if os.path.isdir(cand):
+                    return cand
+        except OSError:
+            pass
+        return ''
+
+    def _case_dir(self, case_id: str) -> str:
+        """某个案件的案卷目录（案件数据与它生成的文书同处一处）
+
+        已存在的按原位返回；新案件落到 <BASE_PATH>/<年份>/<案本号>/。年份只在
+        第一次落盘时定下（写在目录名上），之后靠"找得到就用原来的"保证不会被搬走。
+        """
+        found = self._locate_case_dir(case_id)
+        if found:
+            return found
+        return os.path.join(self.BASE_PATH, self._year_for_case(case_id),
+                            self._safe_case_dirname(case_id))
+
+    def _case_file(self, case_id: str) -> str:
+        """某个案件的数据文件"""
+        return os.path.join(self._case_dir(case_id), _CASE_FILE_NAME)
+
+    def _iter_case_files(self):
+        """遍历现有案件数据文件，产出 (案本号, 文件路径)
+
+        两种布局都认：<BASE>/<年份>/<案本号>/case.json 与 <BASE>/<案本号>/case.json。
+        案本号是定位依据——新布局里它是年份目录的下一层，老布局里就是第一层。
+        """
+        try:
+            entries = sorted(os.listdir(self.BASE_PATH))
+        except OSError:
+            return
+        for entry in entries:
+            top = os.path.join(self.BASE_PATH, entry)
+            if not os.path.isdir(top):
+                continue
+            path = os.path.join(top, _CASE_FILE_NAME)
+            if os.path.isfile(path):
+                yield entry, path                      # 老布局：<BASE>/<案本号>/
+                continue
+            try:
+                for name in sorted(os.listdir(top)):
+                    p = os.path.join(top, name, _CASE_FILE_NAME)
+                    if os.path.isfile(p):
+                        yield name, p                  # 新布局：<BASE>/<年份>/<案本号>/
+            except OSError:
+                pass
 
     def _load_cases_data(self) -> Dict[str, Any]:
-        """加载全部案件数据，返回 {case_id: case_obj}"""
-        path = self._cases_data_path()
-        if not os.path.exists(path):
-            return {}
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            if not (isinstance(data, dict) and isinstance(data.get('cases'), dict)):
-                logger.error("❌ 案件数据文件结构异常（顶层缺少 cases 对象）: %s", path)
-                return {}
-            disk_version = data.get('version')
+        """加载全部案件，返回 {case_id: case_obj}
+
+        单个案件的文件读不出来，只跳过它自己并记 ERROR，不影响其它案件——这正是从
+        「一个全库文件」改成一案一文件要买的东西。版本高于本程序时仍照旧读出来，只记 ERROR。
+        """
+        self._migrate_legacy_cases_file()
+        out: Dict[str, Any] = {}
+        for dirname, path in self._iter_case_files():
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    blk = json.load(f)
+            except Exception as e:
+                logger.error("❌ 跳过读不出来的案件文件 %s: %s", path, e)
+                continue
+            if not isinstance(blk, dict):
+                logger.error("❌ 跳过结构异常的案件文件（顶层不是对象）: %s", path)
+                continue
+            disk_version = blk.get('version')
             if is_newer_version(disk_version):
                 logger.error(
                     "❌ 案件数据版本(%s)高于本程序支持的(%s)——应是更新版程序写的。"
                     "保存时会先自动备份原文件，但请尽快改用新版程序打开，"
                     "否则新版本新增的字段可能在这里丢失。",
                     disk_version, SCHEMA_VERSION)
-            # 磁盘分块结构 → 内存 flat（v2 老档原样返回，见 unpack_case）
-            return {cid: migrate_case(unpack_case(blk))
-                    for cid, blk in data['cases'].items()}
-        except Exception as e:
-            logger.error("❌ 加载案件数据失败: %s", e)
-        return {}
+            if str(blk.get('case_id', '') or '').strip() not in ('', dirname):
+                logger.warning("⚠️ 案件文件里的 case_id(%s) 与目录名(%s) 不一致，以目录名为准",
+                               blk.get('case_id'), dirname)
+            flat = migrate_case(unpack_case(blk))
+            flat['case_id'] = dirname          # 目录名是定位依据，文件里的只作校验
+            out[dirname] = flat
+        return out
 
     @staticmethod
     def _peek_version(path: str) -> str:
@@ -1738,38 +1648,59 @@ class MainWindow(QWidget, Ui_Form):
         except Exception:
             return ''
 
-    def _backup_cases_data(self, path: str) -> None:
-        """保存前的三层备份（任一层失败都不阻断保存）：
+    def _write_case_file(self, case_id: str, block: Dict[str, Any]) -> str:
+        """原子写单个案件文件；写前把旧内容转存 .bak（每次刷新 = 「撤销上一次保存」）
 
-        1) <path>.v2.bak —— 仅首次：升级前的老档原样留一份，便于退回旧版程序
-        2) <path>.bak    —— 每次保存前刷新，相当于「撤销上一次保存」
-        3) backups/cases_data_YYYYMMDD.json —— 每天第一份，滚动保留 _SNAPSHOT_KEEP 天
-
-        原先只在 .bak 不存在时备份一次，于是 .bak 永远停在首次升级时的状态，
-        用户之后改坏数据时它早已不是有效的回滚点。
+        直接以 'w' 打开会立刻截断，写到一半崩溃或磁盘写满，这个案件就没了，
+        所以先写 .tmp 再 os.replace。
         """
-        if not os.path.exists(path):
-            return
-        try:
-            legacy = path + '.v2.bak'
-            if not os.path.exists(legacy) and self._peek_version(path) not in ('', SCHEMA_VERSION):
-                shutil.copy2(path, legacy)
-                print(f"📦 已保留升级前的原案件数据: {legacy}")
+        path = self._case_file(case_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({"version": SCHEMA_VERSION, **block},
+                      f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        # 备份放在「新内容已经写进 .tmp 但还没替换」这一步，而不是开头：
+        # 写失败时不该把上一次的回滚点也覆盖掉，否则一次失败的保存会白丢一个还原点。
+        if os.path.exists(path):
+            try:
+                shutil.copy2(path, path + '.bak')
+            except Exception as e:
+                logger.warning("⚠️ 备份案件文件失败（继续）: %s", e)
+        os.replace(tmp, path)
+        return path
 
-            shutil.copy2(path, path + '.bak')
-            self._daily_snapshot(path)
-        except Exception as e:
-            logger.warning("⚠️ 备份案件数据失败（继续）: %s", e)
+    def _drop_case_files_not_in(self, keep_ids) -> None:
+        """删掉「磁盘上有、这次却没保存」的案件数据文件（维持「写全量」的语义）
 
-    def _daily_snapshot(self, path: str) -> None:
-        """当天第一份快照；顺带清掉过老的快照"""
-        backup_dir = os.path.join(os.path.dirname(path), _BACKUP_DIR)
+        只删 case.json / case.json.bak，**不动案卷里的文书**——文书是办案成果，
+        不该因为数据里没有这个案子就被清掉。
+        """
+        keep = {self._safe_case_dirname(cid) for cid in keep_ids}
+        for dirname, path in list(self._iter_case_files()):
+            if dirname in keep:
+                continue
+            for p in (path, path + '.bak'):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                        logger.info("🗑️ 已删除不再存在的案件数据: %s", p)
+                except Exception as e:
+                    logger.warning("⚠️ 删除案件数据失败 %s: %s", p, e)
+
+    def _daily_snapshot(self, packed: Dict[str, Any]) -> None:
+        """当天第一份快照（仍是「一份全库」，与改造前同名同语义）；顺带清掉过老的快照"""
+        backup_dir = os.path.join(self.BASE_PATH, _BACKUP_DIR)
         os.makedirs(backup_dir, exist_ok=True)
         stamp = datetime.datetime.now().strftime("%Y%m%d")
         dest = os.path.join(backup_dir, f"cases_data_{stamp}.json")
         if os.path.exists(dest):
             return
-        shutil.copy2(path, dest)
+        with open(dest, 'w', encoding='utf-8') as f:
+            json.dump({"version": SCHEMA_VERSION, "cases": packed},
+                      f, ensure_ascii=False, indent=2)
         logger.info("📦 已生成当日案件数据快照: %s", dest)
         stale = sorted(f for f in os.listdir(backup_dir)
                        if f.startswith("cases_data_") and f.endswith(".json"))
@@ -1780,28 +1711,71 @@ class MainWindow(QWidget, Ui_Form):
                 pass
 
     def _save_cases_data(self, cases: Dict[str, Any]) -> bool:
-        """保存全部案件数据到 cases_data.json（内存 flat → 磁盘分块 v3）
+        """保存全部案件（一案一文件；内存 flat → 磁盘分块 v3）
 
-        先写临时文件再原子替换：直接以 'w' 打开会立刻截断原文件，写到一半
-        崩溃或磁盘写满，整份案卷就没了。
+        每个文件各自原子写：某个案件写失败只影响它自己，不会连带丢掉别的案件。代价是
+        N 个文件做不到「跨案件全有全无」——中途失败会留下部分已写，下次保存会再刷一遍
+        （幂等），所以这里只把失败如实返回 False。
+        传入的字典是「全部真相」：磁盘上有、字典里没有的案件数据文件会被删掉（只删数据，不动文书）。
         """
-        path = self._cases_data_path()
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            self._backup_cases_data(path)
+            os.makedirs(self.BASE_PATH, exist_ok=True)
             packed = {cid: pack_case(c) for cid, c in cases.items()}
-            tmp = path + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump({"version": SCHEMA_VERSION, "cases": packed},
-                          f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-            print(f"✅ 案件数据已保存: {path}（共 {len(cases)} 个案件）")
+            for cid, blk in packed.items():
+                self._write_case_file(cid, blk)
+            self._drop_case_files_not_in(packed)
+            self._daily_snapshot(packed)
+            print(f"✅ 案件数据已保存: {len(packed)} 个案件（一案一文件）")
             return True
         except Exception as e:
             logger.error("❌ 保存案件数据失败: %s", e)
             return False
+
+    def _migrate_legacy_cases_file(self) -> None:
+        """把旧的「一个全库文件」拆成一案一文件（幂等、可回退）
+
+        - 触发：<BASE_PATH>/cases_data.json 还在（迁移成功后它被改名 .migrated，不再触发）
+        - 原文件只改名不删除：cases_data.json → cases_data.json.migrated，便于切回旧版程序
+        - 版本非当前时另留一份 cases_data.json.v2.bak（原样备份，旧版程序能读）
+        - 已存在的案件文件不覆盖：中途失败下次启动接着补，不会把新数据盖掉
+        - 任何失败都不动原文件，下次启动重试
+        """
+        legacy = self._legacy_cases_path()
+        if not os.path.exists(legacy):
+            return
+        try:
+            with open(legacy, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error("❌ 旧案件数据读不出来，跳过迁移: %s", e)
+            return
+        if not (isinstance(data, dict) and isinstance(data.get('cases'), dict)):
+            logger.error("❌ 旧案件数据结构异常（顶层缺少 cases 对象），跳过迁移: %s", legacy)
+            return
+
+        legacy_version = data.get('version')
+        try:
+            written = skipped = 0
+            for cid, blk in data['cases'].items():
+                if os.path.exists(self._case_file(cid)):
+                    skipped += 1
+                    continue
+                flat = migrate_case(unpack_case(blk))
+                flat['case_id'] = cid          # 旧文件里案件字典的键就是案本号
+                self._write_case_file(cid, pack_case(flat))
+                written += 1
+            # 全部写成功后才动原文件
+            if legacy_version not in ('', SCHEMA_VERSION):
+                bak = legacy + '.v2.bak'
+                if not os.path.exists(bak):
+                    shutil.copy2(legacy, bak)
+                    print(f"📦 已保留升级前的原案件数据: {bak}")
+            os.replace(legacy, legacy + '.migrated')
+            logger.info("📦 已迁移为一案一文件：新写 %d 个、跳过已存在 %d 个", written, skipped)
+            print(f"📦 案件数据已拆成一案一文件（新写 {written} 个），"
+                  f"原文件改名 {_LEGACY_CASES_FILE}.migrated 留底")
+        except Exception as e:
+            logger.error("❌ 迁移为一案一文件失败（原文件保持不动，下次启动重试）: %s", e)
 
     def _update_case_field(self, case_number: str, **fields) -> bool:
         """把字段写回 cases_data.json 的指定案件"""
@@ -2294,7 +2268,7 @@ class MainWindow(QWidget, Ui_Form):
             return
         # 老案件（此前已有笔录）不补建
         try:
-            folder = os.path.join(self.BASE_PATH, case_id)
+            folder = self._case_dir(case_id)
             cnt = 0
             if os.path.isdir(folder):
                 cnt = sum(1 for f in os.listdir(folder)
@@ -2428,8 +2402,9 @@ class MainWindow(QWidget, Ui_Form):
         """
         elements = case_obj.get('proposed_article_elements', []) or []
         materials = case_obj.get('materials', []) or []
+        # {{已提供材料}} 只列**已勾选**的：未勾选的也列进去，AI 会以为证据已经齐了
         material_names = [m.get('name', '') for m in materials
-                          if isinstance(m, dict) and m.get('name')]
+                          if isinstance(m, dict) and m.get('name') and m.get('provided')]
         injury_time = format_compact_time(case_obj.get('injury_time', ''))
         visit_time = format_compact_time(case_obj.get('visit_time', ''))
 
@@ -2537,47 +2512,6 @@ class MainWindow(QWidget, Ui_Form):
             "family_reps": self._collect_family_reps(),
         }
         return case
-
-    # ========================================================================
-    # AI 条例判断 + 证据分析
-    # ========================================================================
-
-    def _analyze_case_with_ai(self, case_id: str):
-        """对已保存的案件进行 AI 条例与证据分析"""
-        if not case_id:
-            self._set_status('无案本号，无法分析', 'orange')
-            return
-        if not self.ai_service:
-            self._set_status('未配置AI，无法分析', 'orange')
-            QMessageBox.warning(self, "提示", "未配置API密钥，无法进行AI条例分析。\n请在顶部⚙配置中设置API密钥。")
-            return
-        case_obj = self._load_cases_data().get(case_id)
-        if not case_obj:
-            QMessageBox.warning(self, "提示", "未找到该案本号的案件数据")
-            return
-
-        self._set_status('正在AI分析条例与证据...', 'black')
-        QApplication.processEvents()
-
-        self.analysis_worker = RegulationAnalyzeWorker(self.ai_service, case_obj)
-        self.analysis_worker.finished.connect(
-            lambda result: self._on_analysis_finished(case_id, result, case_obj)
-        )
-        self.analysis_worker.error.connect(self._on_analysis_error)
-        self.analysis_worker.start()
-
-    def _on_analysis_finished(self, case_id: str, result: dict, case_obj: dict):
-        self._set_status('AI分析完成', 'green')
-        if '错误' in result:
-            QMessageBox.warning(self, "AI分析失败", result.get('错误', '未知错误'))
-            return
-        # 先给你看分析结果、决定要不要采纳 AI 判的条例——采纳就当场改这个 case_obj（并落盘）。
-        # 弹窗是模态的，返回时采纳已经生效；然后直接拿它拼提示词，本次生成就用上新条例，
-        # 既不用「先采纳、再重新点一次谈话笔录」，也不用「落盘 → 再读回来」。
-        case_obj = self._show_regulation_analysis(case_id, result, case_obj)
-        # 用统一「本人发送给AI提示词」（txt）生成询问笔录，不再用 docx 当提示词
-        prompt_text = self._build_prompt_for_role('本人', case_obj)
-        self._start_transcript_generation('本人', case_id, case_obj, prompt_text)
 
     def _start_transcript_generation(self, role: str, case_id: str, case_obj: dict, prompt_text: str):
         """统一的笔录生成启动（本人/证人/法人共用一条代码路径）：txt 提示词 → AI 后台线程"""
@@ -2696,8 +2630,26 @@ class MainWindow(QWidget, Ui_Form):
         prompt = load_prompt(meta['ai_prompt'])
         return render_prompt_template(prompt, self._prompt_fill_data(role, case_obj), role)
 
+    def _build_prompt_or_warn(self, role: str, case_obj: dict) -> Optional[str]:
+        """拼提示词；提示词文件缺失/为空时给个明确提示，返回 None（别让程序闪退）。
+
+        这个异常必须在这里兜住：调用它的是 Qt 槽函数，漏出去的异常会被 qFatal 直接中止
+        进程（见 log_utils.install_excepthook），用户只会看到程序莫名其妙关掉。
+        """
+        from prompt_manager import PromptError
+        try:
+            return self._build_prompt_for_role(role, case_obj)
+        except PromptError as e:
+            logger.error(f"❌ 无法生成{role}谈话笔录：{e}")
+            QMessageBox.critical(
+                self, "提示词文件有问题",
+                f"无法生成{role}谈话笔录。\n\n{e}\n\n"
+                f"请检查 resource/prompts/ 下的提示词文件（可能被删除、清空或被占用）。")
+            self._set_status(f'{role}笔录：提示词文件缺失或为空', 'red')
+            return None
+
     def _generate_role_transcript(self, role: str):
-        """统一的谈话笔录生成入口（证人/法人由此进入；本人经条例分析后直接调 _start_transcript_generation）"""
+        """统一的谈话笔录生成入口——四个角色都走这里（数据核对确认后拼提示词 → AI 后台线程）"""
         case_id = self.current_case_id or self.lineEdit_2.text().strip()
         if not case_id:
             self._set_status(f'无案本号，无法生成{role}笔录', 'orange')
@@ -2710,7 +2662,9 @@ class MainWindow(QWidget, Ui_Form):
         if not case_obj:
             self._set_status('未找到该案本号的案件数据', 'orange')
             return
-        prompt_text = self._build_prompt_for_role(role, case_obj)
+        prompt_text = self._build_prompt_or_warn(role, case_obj)
+        if prompt_text is None:
+            return
         self._start_transcript_generation(role, case_id, case_obj, prompt_text)
 
     def _on_transcript_generated(self, role: str, case_id: str, case_obj: dict, result: dict):
@@ -2803,7 +2757,8 @@ class MainWindow(QWidget, Ui_Form):
             # ── 5. 保存 ──
             if not self.current_case_folder or not os.path.exists(self.current_case_folder):
                 folder_subject = str(case_obj.get('case_id', '') or case_obj.get('name', '') or '案件').strip()
-                self.current_case_folder = os.path.join(self.BASE_PATH, folder_subject)
+                # 走 _case_dir：年份目录 + 已存在的按原位（文书和数据必须落在同一个案卷文件夹里）
+                self.current_case_folder = self._case_dir(folder_subject)
                 os.makedirs(self.current_case_folder, exist_ok=True)
 
             subject = str(case_obj.get('name', '') or case_obj.get('case_id', '') or '案件').strip()
@@ -2913,125 +2868,6 @@ class MainWindow(QWidget, Ui_Form):
             '公司名称': case_obj.get('labor_unit', ''),  # 用人单位（签合同的单位）
         }
 
-
-    def _on_analysis_error(self, err: str):
-        self._set_status('AI分析出错', 'red')
-        QMessageBox.critical(self, "AI分析错误", f"分析出错: {err}")
-
-    def _show_regulation_analysis(self, case_id: str, result: dict, case_obj: dict) -> dict:
-        """弹窗展示分析结果；若采纳 AI 判的条例，就当场改 case_obj 并落盘。
-
-        返回 case_obj：采纳过是改好的那一份，没采纳是原样——调用方直接拿去拼提示词。
-        """
-        judged = result.get('judged_article', '')
-        judged_reason = result.get('judged_article_reason', '')
-        missing = result.get('missing_evidence', []) or []
-        consistency = result.get('consistency', '')
-        reason = result.get('reason', '')
-        proposed = case_obj.get('proposed_article', '')
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("AI 条例分析结果")
-        dlg.resize(620, 600)
-        layout = QVBoxLayout(dlg)
-
-        title = QLabel("AI 条例与证据分析")
-        title.setStyleSheet("font-size: 15px; font-weight: bold; padding: 4px;")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
-
-        text = QTextEdit()
-        text.setReadOnly(True)
-        text.setFont(QFont("微软雅黑", 10))
-        lines = [
-            "【判断应适用条例】",
-            f"　{judged}",
-        ]
-        if judged_reason:
-            lines.append(f"　依据：{judged_reason}")
-        lines.append("")
-        lines.append("【工作人员拟用条例】")
-        lines.append(f"　{proposed or '未填写'}")
-        lines.append("")
-        lines.append("【一致/分歧判断】")
-        lines.append(f"　{consistency}")
-        if reason:
-            lines.append(f"　理由：{reason}")
-        lines.append("")
-        lines.append("【尚缺关键证据清单】")
-        if missing:
-            for i, e in enumerate(missing, 1):
-                lines.append(f"　{i}. {e}")
-        else:
-            lines.append("　（无）")
-        text.setPlainText("\n".join(lines))
-        layout.addWidget(text, 1)
-
-        btn_layout = QHBoxLayout()
-        if consistency == '分歧':
-            q = QLabel("是否把拟用条例修改为 AI 判断的条例？")
-            q.setStyleSheet("color:#c0392b; font-weight:bold;")
-            btn_layout.addWidget(q)
-            btn_layout.addStretch()
-            no_btn = QPushButton("否")
-            no_btn.clicked.connect(lambda: self._on_regulation_choice(
-                False, dlg, case_id, judged, missing, case_obj))
-            btn_layout.addWidget(no_btn)
-            yes_btn = QPushButton("是")
-            yes_btn.setStyleSheet(
-                "QPushButton{background-color:#27ae60;color:white;font-weight:bold;padding:5px 22px;border-radius:4px;}"
-            )
-            yes_btn.clicked.connect(lambda: self._on_regulation_choice(
-                True, dlg, case_id, judged, missing, case_obj))
-            btn_layout.addWidget(yes_btn)
-        else:
-            btn_layout.addStretch()
-            close_btn = QPushButton("关闭")
-            close_btn.clicked.connect(dlg.accept)
-            btn_layout.addWidget(close_btn)
-
-        layout.addLayout(btn_layout)
-        dlg.exec_()
-        return case_obj
-
-    def _on_regulation_choice(self, yes: bool, dlg: QDialog, case_id: str, judged: str,
-                              missing: list, case_obj: dict):
-        dlg.accept()
-        if yes:
-            self._apply_regulation_change(case_id, judged, missing, case_obj)
-            QMessageBox.information(self, "已修改", f"拟用条例已修改为：{judged}\n关键证据清单已相应更新。")
-        else:
-            self._set_status('已保留原拟用条例', 'black')
-
-    def _apply_regulation_change(self, case_id: str, judged_article: str,
-                                 missing_evidence: list, case_obj: dict) -> dict:
-        """把拟用条例改成 AI 判的条例，同步界面 + 证据清单，并落盘；返回同一个 case_obj。
-
-        就地改传进来的对象（调用方手里那份），提示词随后直接拿它拼——不必「落盘再读回来」，
-        落盘只为持久化。以前是「先落盘、后更新证据清单、再重读」，刚补进清单的证据读不回来。
-        """
-        # 1. 主界面条例下拉框 + 数据模型
-        self._apply_regulation(judged_article)
-        # 2. 改内存里的案件对象
-        case_obj['proposed_article'] = judged_article
-        case_obj['proposed_article_elements'] = _regulation_elements(judged_article)
-        # 3. 关键证据清单：把缺失证据作为未勾选项补进材料清单，并写进同一个对象
-        if missing_evidence and hasattr(self, 'material_list'):
-            materials = self.material_list.get_materials()
-            existing = {m.get('name', '') for m in materials}
-            for ev in missing_evidence:
-                if ev and ev not in existing:
-                    materials.append({"name": ev, "provided": False, "notes": ""})
-                    existing.add(ev)
-            self.material_list.set_materials(materials)
-            self.data_model.investigation['本人材料'] = materials
-            case_obj['materials'] = materials
-        # 4. 落盘（为写全量而读全量，与拼提示词无关）
-        cases = self._load_cases_data()
-        cases[case_id] = case_obj
-        self._save_cases_data(cases)
-        self._set_status(f'拟用条例已修改为：{judged_article}', 'green')
-        return case_obj
 
     # ========================================================================
     # F2 测试数据轮换
@@ -4436,8 +4272,8 @@ class MainWindow(QWidget, Ui_Form):
                 QMessageBox.warning(self, "提示", "请先输入或生成案本号")
                 return
 
-            # 2. 用案本号找案件文件夹
-            case_folder = os.path.join(self.BASE_PATH, case_number)
+            # 2. 用案本号找案件文件夹（年份目录 + 老布局都认）
+            case_folder = self._case_dir(case_number)
             if not os.path.exists(case_folder):
                 self._set_status('未找到案件目录', 'red')
                 QMessageBox.warning(self, "提示", f"未找到案本号对应的案件目录：\n{case_folder}")
@@ -5254,8 +5090,8 @@ class MainWindow(QWidget, Ui_Form):
             applicant_name = case_data.get('applicant_name', '')
             self.set_data('申请人名称', applicant_name, 'case')
 
-            # ── 4. 确定案件文件夹（笔录都保存在 BASE_PATH/<案本号>/ 下）──
-            case_folder = os.path.join(self.BASE_PATH, case_number)
+            # ── 4. 确定案件文件夹（笔录保存在 <BASE_PATH>/<年份>/<案本号>/ 下）──
+            case_folder = self._case_dir(case_number)
             if not os.path.exists(case_folder):
                 # 兼容旧数据：JSON folder_name 或当前案件文件夹或兜底
                 folder_name = case_data.get('folder_name', '')

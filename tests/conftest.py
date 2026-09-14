@@ -13,12 +13,26 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(scope="session", autouse=True)
+def isolated_storage(tmp_path_factory):
+    """把 path_utils 的存储目录指到临时目录，保证测试永远碰不到真实案卷库。
+
+    ⚠️ 必须在**构造 MainWindow 之前**生效：MainWindow 构造时会读真实的桌面存储目录，
+    而存储层在那里会跑一遍「一案一文件」迁移——只在构造后 monkeypatch BASE_PATH
+    根本拦不住，光跑测试就会把真实案卷库拆掉（这个坑真踩过一次）。
+    """
+    import path_utils
+    d = tmp_path_factory.mktemp("storage")
+    path_utils.path_utils.storage_dir = d
+    return d
+
+
 @pytest.fixture(scope="session")
-def win(qapp, tmp_path_factory):
+def win(qapp, isolated_storage):
     """会话级 MainWindow，数据目录隔离到临时目录"""
     import app_main as A
     w = A.MainWindow()
-    w.BASE_PATH = str(tmp_path_factory.mktemp("cases"))
+    w.BASE_PATH = str(isolated_storage)
     return w
 
 

@@ -453,20 +453,6 @@ class Test条例目录:
         assert not any("第七项" in t for t in texts)
         assert win.comboBox.count() == len(CaseClassifier.REGULATIONS)
 
-    def test_提示词对照表已同步(self):
-        """AI 靠这张对照表判定条例，留下已删的项会让它返回不存在的条例。
-
-        两处副本都要查：外置的 txt 文件，以及 prompt_manager 里的兜底默认值。
-        """
-        import io
-        import prompt_manager
-
-        path = "resource/prompts/条例分析系统.txt"
-        assert "第十四条第（七）项" not in io.open(path, encoding="utf-8").read(), \
-            f"{path} 里还留着已删的条例"
-        assert "第十四条第（七）项" not in prompt_manager.DEFAULT_PROMPTS["regulation_system"], \
-            "prompt_manager 的兜底副本没同步"
-
     def test_F2预设选中的条例与预期一致(self, win):
         """回归：预设原先用下拉索引定位，删掉中间一项后工亡预设会静默指错"""
         import app_main as A
@@ -857,114 +843,6 @@ class Test主界面布局:
 
 
 # ============================================================================
-# 先采纳条例、再生成（条例分析的结果要在同一次生成里生效）
-# ============================================================================
-
-class Test先采纳再生成:
-    """采纳 AI 判的条例后，本次生成的提示词必须已经是新条例。
-
-    旧顺序是「先生成、后弹窗」，于是采纳完还得再点一次「谈话笔录」才能用上新条例，
-    提示词里的 {{拟用条例}}/{{法律要件}}、连带第（六）项的现住址问项、以及采纳时
-    补进材料清单的缺证据，全都是下一遍才生效。
-    """
-
-    CASE_ID = "T-先采纳再生成"
-
-    @pytest.fixture
-    def stored_case(self, win):
-        """往（临时目录里的）案件库塞一份待生成本人的案本，用完清掉"""
-        cases = win._load_cases_data()
-        cases[self.CASE_ID] = {
-            "case_id": self.CASE_ID, "name": "张三", "case_nature": "工伤案件",
-            "applicant_type": "单位申请", "proposed_article": "第十四条第（一）项",
-            "unit_type": "企业", "identity": "职工",
-            "injury_description": "张三在工地被滑落的水泥袋砸伤右脚。",
-            "materials": [{"name": "身份证复印件", "provided": True, "notes": ""}],
-        }
-        win._save_cases_data(cases)
-        yield
-        cases = win._load_cases_data()
-        cases.pop(self.CASE_ID, None)
-        win._save_cases_data(cases)
-
-    def _run(self, win, monkeypatch, analysis, case_obj):
-        """跑一遍「分析完成」，拦住弹窗与后台生成、把拼好的提示词捞出来。
-
-        analysis 模拟用户在弹窗里的选择，签名 (case_id, case_obj)；采纳要**就地**改 co。
-
-        注意 fake_analysis 必须返回传进来的那个对象、而不是 analysis 的返回值——
-        真实弹窗就是这样的（采纳靠原地修改 case_obj 生效，不靠返回值传递）。写成
-        「返回 analysis 的返回值」会掩盖「_apply_regulation_change 改成拷贝」这类错误。
-        """
-        captured = {}
-
-        def fake_analysis(cid, _res, co):
-            analysis(cid, co)
-            return co
-
-        monkeypatch.setattr(win, '_show_regulation_analysis', fake_analysis)
-        monkeypatch.setattr(win, '_start_transcript_generation',
-                            lambda role, cid, co, text: captured.update(
-                                role=role, case=co, text=text))
-        win._on_analysis_finished(self.CASE_ID, {'judged_article': '第十四条第（六）项'},
-                                 case_obj)
-        return captured
-
-    def _stored(self, win):
-        return win._load_cases_data().get(self.CASE_ID)
-
-    def test_采纳后本次生成的提示词就是新条例(self, win, stored_case, monkeypatch):
-        captured = self._run(win, monkeypatch,
-                             lambda cid, co: win._apply_regulation_change(
-                                 cid, '第十四条第（六）项', ['监控录像'], co),
-                             self._stored(win))
-
-        text = captured.get('text', '')
-        assert captured.get('role') == '本人'
-        assert '第十四条第（六）项' in text, "本次生成用的还是旧条例"
-        assert '第十四条第（一）项' not in text
-        assert '现住址' in text, "第（六）项的【补充问项】也该同一次生效"
-        assert '监控录像' in text, "采纳时补进证据清单的缺证据没进本次提示词"
-
-        # 落盘还是要发生（持久化），只是不再为了拼提示词而重读
-        on_disk = self._stored(win)
-        assert on_disk.get('proposed_article') == '第十四条第（六）项'
-        assert '监控录像' in [m.get('name') for m in on_disk.get('materials', [])]
-
-    def test_不采纳就沿用原条例(self, win, stored_case, monkeypatch):
-        # 用户在弹窗上直接关掉（一致/关闭，或点「否」）
-        captured = self._run(win, monkeypatch, lambda cid, co: None, self._stored(win))
-
-        text = captured.get('text', '')
-        assert '第十四条第（一）项' in text
-        assert '现住址' not in text
-        assert '监控录像' not in text
-
-    def test_不采纳时一次磁盘都不读(self, win, stored_case, monkeypatch):
-        """删掉的那次重读不能偷偷回来：没采纳就没有落盘，也就不该读磁盘"""
-        case_obj = self._stored(win)
-        reads = []
-        raw = win._load_cases_data
-        monkeypatch.setattr(win, '_load_cases_data', lambda: (reads.append(1), raw())[1])
-
-        self._run(win, monkeypatch, lambda cid, co: None, case_obj)
-        assert reads == [], "没采纳却读了 %d 次 cases_data.json" % len(reads)
-
-    def test_采纳时只为落盘读一次(self, win, stored_case, monkeypatch):
-        """采纳要落盘，读全量是为了写全量——这是唯一允许的读，不是为拼提示词"""
-        case_obj = self._stored(win)
-        reads = []
-        raw = win._load_cases_data
-        monkeypatch.setattr(win, '_load_cases_data', lambda: (reads.append(1), raw())[1])
-
-        self._run(win, monkeypatch,
-                  lambda cid, co: win._apply_regulation_change(
-                      cid, '第十四条第（六）项', ['监控录像'], co),
-                  case_obj)
-        assert len(reads) == 1, "采纳一次只该读 1 次（为落盘），实际 %d 次" % len(reads)
-
-
-# ============================================================================
 # 提示词里的条件块（写在 resource/prompts/*.txt，用 {% if %} 控制）
 # ============================================================================
 
@@ -1019,23 +897,26 @@ class Test模板条件块:
 
     @pytest.mark.parametrize('role', ['本人', '证人', '法人', '家属'])
     def test_四个角色都有时间核对块(self, role):
-        from app_main import render_prompt_template
-        from prompt_manager import load_prompt
-        out = render_prompt_template(load_prompt(self.PROMPT_KEY[role]),
-                                     {'受伤时间': '2026年07月20日16时20分',
-                                      '就诊时间': '2026年07月20日19时00分',
-                                      '拟用条例': '第十四条第（六）项'}, role)
+        out = self._render_template(role, 受伤时间='2026年07月20日16时20分',
+                                    就诊时间='2026年07月20日19时00分',
+                                    拟用条例='第十四条第（六）项')
         assert self.TIME_JA in out
 
     @pytest.mark.parametrize('role', ['证人', '法人', '家属'])
     def test_只有本人有现住址块(self, role):
-        from app_main import render_prompt_template
-        from prompt_manager import load_prompt
-        out = render_prompt_template(load_prompt(self.PROMPT_KEY[role]),
-                                     {'受伤时间': 'T', '就诊时间': 'V',
-                                      '拟用条例': '第十四条第（六）项'}, role)
+        out = self._render_template(role, 受伤时间='T', 就诊时间='V',
+                                    拟用条例='第十四条第（六）项')
         assert self.ADDR not in out
         assert '现住址' not in out, f"{role} 模板里不该有现住址那一问"
+
+    def _render_template(self, role, **over):
+        """直接用模板渲染，绕开 MainWindow（条件里用到的键都必须给全，缺了会报错）"""
+        from app_main import render_prompt_template
+        from prompt_manager import load_prompt
+        data = {'申请类型': '单位申请', '案件性质': '工伤案件', '拟用条例': '',
+                '受伤时间': '', '就诊时间': ''}
+        data.update(over)
+        return render_prompt_template(load_prompt(self.PROMPT_KEY[role]), data, role)
 
     def test_四份模板的if都配对(self):
         """if/endif 数不匹配会渲染报错，先在文件层面钉住（注释里的示例不算）"""
@@ -1048,3 +929,211 @@ class Test模板条件块:
             assert code.count('{% if ') == code.count('{% endif %}'), f'{role} 模板 if/endif 不配对'
             assert code.count('{% if 受伤时间 and 就诊时间 %}') == 1, \
                 f'{role} 模板的时间核对块条件缺失或重复'
+
+
+# ============================================================================
+# 提示词瘦身（本人那份：删无用字段、按案件裁掉无关分支、不把未交材料说成已提供）
+# ============================================================================
+
+class Test提示词精简:
+    """这几条盯的不是字数，而是「AI 拿到的信息与本案是否自洽」。
+
+    给它一份和本案无关的申请类型说明、或把没交的材料列成「已提供」，都会让它问错问题、
+    误判证据齐备 —— 精简的目的首先是不误导。
+    """
+
+    def _本人(self, win, **case_over):
+        case = {'case_id': 'T-精简', 'proposed_article': '第十四条第（一）项',
+                'applicant_type': '单位申请',
+                'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                              {'name': '考勤记录', 'provided': False, 'notes': ''}]}
+        case.update(case_over)
+        return win._build_prompt_for_role('本人', case)
+
+    def test_申请时间受理时间不进提示词(self, win):
+        """这两个字段被 5 份 docx 文书模板用着，但格式要求不许笔录里出现询问时间"""
+        out = self._本人(win, apply_time='2026年07月21日', accept_time='2026年07月22日')
+        assert '申请时间' not in out
+        assert '受理时间' not in out
+
+    def test_申请情形适配只出相关的一条(self, win):
+        danwei = self._本人(win, applicant_type='单位申请')
+        geren = self._本人(win, applicant_type='个人申请')
+        assert '单位已（拟）提出申请' in danwei
+        assert '由职工本人自行提出申请' not in danwei, "单位申请案里混进了个人申请的说明"
+        assert '由职工本人自行提出申请' in geren
+        assert '单位已（拟）提出申请' not in geren, "个人申请案里混进了单位申请的说明"
+
+    def test_已提供材料只列勾选的(self, win):
+        out = self._本人(win)
+        assert '身份证复印件' in out
+        assert '考勤记录' not in out, "未勾选的材料被当成已提供了"
+
+    def test_一件材料都没勾时该行消失(self, win):
+        out = self._本人(win, materials=[{'name': '身份证复印件', 'provided': False, 'notes': ''}])
+        # 只看「- 已提供证据材料：」这个字段行；【重要要求】里那句「与已提供证据材料不一致」
+        # 是规则文字，不受影响
+        assert '- 已提供证据材料：' not in out, "没勾任何材料时不该留一条空壳行"
+
+
+class Test案件情形适配裁剪:
+    """证人/法人/家属 的【案件情形适配】按「案件性质 × 申请类型」裁掉无关分支。
+
+    证人/法人 是**两个维度**（可能同时是工亡 + 个人申请），两段不是二选一；
+    家属笔录本身只做工亡，只有一个维度。最极端的「工伤 + 单位申请」两段都不适用，
+    整段应当消失——这正是最常见的那种案子。
+    """
+
+    KEYS = {'本人': 'self_send_to_ai', '证人': 'witness_send_to_ai',
+            '法人': 'legal_send_to_ai', '家属': 'family_send_to_ai'}
+    HEAD = '【案件情形适配'
+    # (角色, 工亡那段里的特征词, 个人申请那段里的特征词)
+    ROLES = [('证人', '向证人核实死亡', '可请证人（尤其是工友）佐证'),
+             ('法人', '核实职工死亡时间', '强调单位是否已为职工参加工伤保险')]
+
+    def _render(self, role, nature, applicant):
+        from app_main import render_prompt_template
+        from prompt_manager import load_prompt
+        return render_prompt_template(
+            load_prompt(self.KEYS[role]),
+            {'案件性质': nature, '申请类型': applicant, '拟用条例': '第十四条第（一）项',
+             '受伤时间': '', '就诊时间': ''}, role)
+
+    @pytest.mark.parametrize('role,death,geren', ROLES)
+    def test_工伤单位申请_整段消失(self, role, death, geren):
+        out = self._render(role, '工伤案件', '单位申请')
+        assert self.HEAD not in out, "两段都不适用时整段该消失"
+        assert death not in out and geren not in out
+
+    @pytest.mark.parametrize('role,death,geren', ROLES)
+    def test_工伤个人申请_只留个人那段(self, role, death, geren):
+        out = self._render(role, '工伤案件', '个人申请')
+        assert self.HEAD in out and geren in out
+        assert death not in out, "工伤案里混进了工亡那段"
+
+    @pytest.mark.parametrize('role,death,geren', ROLES)
+    def test_工亡单位申请_只留工亡那段(self, role, death, geren):
+        out = self._render(role, '工亡案件', '单位申请')
+        assert death in out
+        assert geren not in out, "单位申请案里混进了个人申请那段"
+
+    @pytest.mark.parametrize('role,death,geren', ROLES)
+    def test_工亡个人申请_两段都在(self, role, death, geren):
+        out = self._render(role, '工亡案件', '个人申请')
+        assert death in out and geren in out, "两个维度都命中时两段都该在"
+
+    def test_家属只有申请类型一个维度(self):
+        danwei = self._render('家属', '工亡案件', '单位申请')
+        geren = self._render('家属', '工亡案件', '个人申请')
+        assert '由用人单位提出' in danwei
+        assert '由死者近亲属提出' not in danwei
+        assert '由死者近亲属提出' in geren
+        assert '由用人单位提出' not in geren
+
+    def test_家属的工亡正文不被裁掉(self):
+        """家属笔录只做工亡，那段正文与申请类型无关，任何组合都该在"""
+        for applicant in ('单位申请', '个人申请'):
+            out = self._render('家属', '工亡案件', applicant)
+            assert '本次系对死者近亲属的询问' in out
+            assert '48小时内抢救无效死亡' in out
+
+
+# ============================================================================
+# 提示词文件缺失/为空：直接报错，不再静默回退
+# ============================================================================
+
+class Test提示词文件缺失要报错:
+    """txt 是唯一事实源：缺失/为空一律抛 PromptError，不回退到内置副本。
+
+    以前会静默拿一份很旧的提示词继续生成（缺字段、无条件块），界面上完全看不出来。
+    更要紧的是异常不能漏给 Qt：槽函数里漏出去会被 qFatal 中止进程，用户只看到闪退。
+    """
+
+    def _patch_dir(self, tmp_path, monkeypatch):
+        import prompt_manager as pm
+        monkeypatch.setattr(pm, "_prompts_dir", lambda: str(tmp_path))
+        return pm
+
+    def test_文件不存在抛PromptError(self, tmp_path, monkeypatch):
+        from prompt_manager import PromptError
+        pm = self._patch_dir(tmp_path, monkeypatch)
+        with pytest.raises(PromptError, match="不存在"):
+            pm.load_prompt('self_send_to_ai')
+
+    def test_文件是空的抛PromptError(self, tmp_path, monkeypatch):
+        from prompt_manager import PromptError
+        pm = self._patch_dir(tmp_path, monkeypatch)
+        (tmp_path / pm.PROMPT_FILES['self_send_to_ai']).write_text('  \n\n ', encoding='utf-8')
+        with pytest.raises(PromptError, match="空的"):
+            pm.load_prompt('self_send_to_ai')
+
+    def test_未知key抛KeyError(self):
+        import prompt_manager as pm
+        with pytest.raises(KeyError):
+            pm.load_prompt('这个key不存在')
+
+    def test_读得出来就返回全文并剥掉BOM与空白(self, tmp_path, monkeypatch):
+        pm = self._patch_dir(tmp_path, monkeypatch)
+        name = pm.PROMPT_FILES['self_send_to_ai']
+        (tmp_path / name).write_text('  姓名：{{本人姓名}}  ', encoding='utf-8-sig')
+        assert pm.load_prompt('self_send_to_ai') == '姓名：{{本人姓名}}'
+
+    def test_界面层兜住异常并提示用户(self, win, monkeypatch):
+        """_build_prompt_or_warn 必须吞掉 PromptError：否则 qFatal 直接把程序打断"""
+        import prompt_manager as pm
+        from PyQt5.QtWidgets import QMessageBox
+        from prompt_manager import PromptError
+
+        def boom(key):
+            raise PromptError('假的：提示词文件不存在')
+
+        monkeypatch.setattr(pm, 'load_prompt', boom)
+        seen = {}
+        monkeypatch.setattr(QMessageBox, 'critical', lambda *a, **k: seen.update(args=a))
+        monkeypatch.setattr(win, '_set_status', lambda *a, **k: seen.update(status=a))
+
+        assert win._build_prompt_or_warn('本人', {'case_id': 'T-缺文件'}) is None
+        assert seen.get('args'), "没给用户任何提示"
+        assert seen.get('status'), "状态栏没提示"
+
+    def test_提示词都在(self):
+        """9 份提示词文件都得在——这是「不回退」之后最容易踩的坑"""
+        import io
+        import prompt_manager as pm
+        for key, name in pm.PROMPT_FILES.items():
+            path = io.open('resource/prompts/%s' % name, encoding='utf-8-sig').read().strip()
+            assert path, f"{name}（{key}）缺失或为空"
+
+
+# ============================================================================
+# 谈话笔录按钮：四个角色同一条路
+# ============================================================================
+
+class Test谈话笔录生成路径:
+    """本人过去比别的角色多跑一次 AI「条例判断 + 一致性比对」，那套已删。
+
+    现在四个角色都是：数据核对 → 拼提示词 → 生成。这条用例钉住「本人不再走额外
+    那一次调用」——不然很容易被重新加回来（多一次调用、多一段等待、多一份没依据的建议）。
+    """
+
+    @pytest.mark.parametrize('role', ['本人', '证人', '法人', '家属'])
+    def test_按钮都走同一个生成入口(self, win, as_role, monkeypatch, role):
+        win = as_role(role)
+        calls = []
+        monkeypatch.setattr(win, 'open_data_review', lambda: True)
+        monkeypatch.setattr(win, '_generate_role_transcript', lambda r: calls.append(r))
+
+        win.on_talk_button_clicked()
+
+        assert calls == [role], f"{role} 没走统一的生成入口，实际：{calls}"
+
+    def test_没有条例判断那套残留(self):
+        """删掉的入口不该再被引用回来"""
+        import app_main
+        import prompt_manager as pm
+        for gone in ('_analyze_case_with_ai', '_on_analysis_finished',
+                     '_show_regulation_analysis', '_apply_regulation_change'):
+            assert not hasattr(app_main.MainWindow, gone), f'MainWindow.{gone} 又回来了'
+        assert not hasattr(app_main, 'RegulationAnalyzeWorker'), '条例判断工作线程又回来了'
+        assert 'regulation_system' not in pm.PROMPT_FILES
+        assert 'regulation_user' not in pm.PROMPT_FILES
