@@ -95,6 +95,13 @@ UNIT_TYPES = ["企业", "机关（公务员）", "事业单位"]
 DEFAULT_UNIT_TYPE = "企业"
 DEFAULT_IDENTITY = "职工"
 
+# 单位性质 → 该单位人员的中文称谓（用于给 AI 的「称谓提示」）。
+# 下拉框的标签（如「机关（公务员）」）带括号，不能直接拼进句子里，故单独映射；企业档不提示。
+UNIT_TYPE_APPELLATION = {
+    "机关（公务员）": "机关工作人员",
+    "事业单位": "事业单位工作人员",
+}
+
 # canonical 英文键 → 中文后缀（用于拼 本人姓名/证人姓名/… 兼容扁平键）
 PERSON_CN_SUFFIX = {
     "name": "姓名",
@@ -256,11 +263,35 @@ ROLE_TALK = {
 }
 
 
+def format_compact_time(value: str) -> str:
+    """把受伤/就诊时间的紧凑格式 YYYYMMDDHHMM 变成「2026年07月20日16时20分」。
+
+    长度不是 12 位、或含非数字时原样返回（不猜、不截断）；空值返回空串。
+    月/日/时/分补零，与 _resolve_date_input 处理 申请/受理时间 的口径一致。
+    """
+    s = str(value or '').strip()
+    if len(s) != 12 or not s.isdigit():
+        return s
+    return (f"{s[0:4]}年{s[4:6]}月{s[6:8]}日{s[8:10]}时{s[10:12]}分")
+
+
 def render_prompt_template(template: str, data: Dict[str, Any], label: str = '') -> str:
-    """按 data 逐个替换 {{key}} 占位符；替换后仍有残留 {{…}} 则告警（防止模板加了新占位符而代码未填）。"""
+    """按 data 逐个替换 {{key}} 占位符。
+
+    占位符被替换成空串、且它独占一行（形如「- 标签：{{占位符}}」）时，整行删掉——
+    否则提示词里会留下「- 称谓提示：」这种只有标签、没有内容的空壳行。
+    替换后仍有残留 {{…}} 则告警（防止模板加了新占位符而代码未填）。
+    """
     for key, val in data.items():
-        if val is not None:
-            template = template.replace('{{%s}}' % key, str(val))
+        if val is None:
+            continue
+        token = '{{%s}}' % key
+        if token not in template:
+            continue
+        if str(val) == '':
+            template = re.sub(r'^[^\n{}]*' + re.escape(token) + r'[ \t]*(?:\r?\n|$)',
+                              '', template, flags=re.M)
+        template = template.replace(token, str(val))
     leftovers = sorted(set(re.findall(r'\{\{([^}]*)\}\}', template)))
     if leftovers:
         logger.warning(f"⚠️ 提示词「{label}」仍有未替换占位符: {leftovers}")
@@ -2365,6 +2396,8 @@ class MainWindow(QWidget, Ui_Form):
         materials = case_obj.get('materials', []) or []
         material_names = [m.get('name', '') for m in materials
                           if isinstance(m, dict) and m.get('name')]
+        injury_time = format_compact_time(case_obj.get('injury_time', ''))
+        visit_time = format_compact_time(case_obj.get('visit_time', ''))
 
         # 统一中文占位符
         zh = {
@@ -2376,6 +2409,8 @@ class MainWindow(QWidget, Ui_Form):
             '工地名称': case_obj.get('site', ''),
             '申请时间': case_obj.get('apply_time', ''),
             '受理时间': case_obj.get('accept_time', ''),
+            '受伤时间': injury_time,
+            '就诊时间': visit_time,
             '拟用条例': case_obj.get('proposed_article', ''),
             '法律要件': ' + '.join(elements) if elements else '',
             '本人姓名': case_obj.get('name', ''),
@@ -2406,6 +2441,8 @@ class MainWindow(QWidget, Ui_Form):
             'site': case_obj.get('site', ''),
             'apply_time': case_obj.get('apply_time', ''),
             'accept_time': case_obj.get('accept_time', ''),
+            'injury_time': injury_time,
+            'visit_time': visit_time,
             'proposed_article': case_obj.get('proposed_article', ''),
             'proposed_article_elements': ' + '.join(elements) if elements else '',
             'name': case_obj.get('name', ''),
@@ -2519,13 +2556,19 @@ class MainWindow(QWidget, Ui_Form):
         self.transcript_worker.start()
 
     def _identity_wording_hint(self, unit_type: str, identity: str, role: str) -> str:
-        """按单位性质/身份给 AI 一句话措辞提示；企业案返回空（沿用“职工/公司”口径）。"""
-        ut = (unit_type or DEFAULT_UNIT_TYPE).strip()
-        ident = (identity or "").strip() or DEFAULT_IDENTITY
-        if ut in ("企业", ""):
+        """按单位性质/身份给 AI 一句措辞提示（只返回句子，行首「- 称谓提示：」标签在模板里）。
+
+        企业案返回空串——沿用「职工/公司」口径，无需提示；此时提示词里那一行会整行消失
+        （见 render_prompt_template：被替换成空串的占位符若独占一行则整行删掉）。
+        机关/事业单位若不提示，AI 容易写出「公司职工、考勤打卡、车间班组」等企业话术。
+        """
+        ut = (unit_type or "").strip() or DEFAULT_UNIT_TYPE
+        if ut == "企业":
             return ""
+        ident = (identity or "").strip() or DEFAULT_IDENTITY
+        appellation = UNIT_TYPE_APPELLATION.get(ut) or f"{ut}工作人员"
         return (f"本案单位性质为【{ut}】。{role}的身份是【{ident}】。"
-                f"请把受伤职工/被询问人称谓写成“{ut}工作人员/公务员”，"
+                f"请把受伤职工/被询问人的称谓写成“{appellation}”，"
                 f"避免“公司职工、在公司上班、考勤打卡、车间班组”等企业话术。")
 
     def _prompt_fill_data(self, role: str, case_obj: dict) -> Dict[str, Any]:
@@ -2609,24 +2652,19 @@ class MainWindow(QWidget, Ui_Form):
 
     def _time_check_instruction(self, case_obj: dict) -> str:
         """生成笔录时的时间核对要求：
-        1) 受伤时间(字段) 与 案件陈述中的受伤时间不一致 → 请 AI 追加一问核实；
-        2) 受伤时间 与 就诊时间 间隔明显不合理 → 请 AI 追加一问解释延迟就诊。"""
-        injury = str(case_obj.get('injury_time', '') or '').strip()
-        visit = str(case_obj.get('visit_time', '') or '').strip()
-        lines = []
-        if injury:
-            lines.append(
-                f"本案填写的受伤时间为：{injury}（年月日时分）。请将它与本案受伤经过/案件陈述文字中提到的受伤时间核对："
-                f"若陈述中的时间与本处填写的受伤时间不一致，请在笔录问答中加入一问，请被询问人确认哪个受伤时间准确并说明为何不一致；"
-                f"若一致则无需就此提问。"
-            )
-        if injury and visit:
-            lines.append(
-                f"本案就诊时间为：{visit}。请判断受伤后是否在合理时间内就医：若受伤时间与就诊时间相隔明显不合理"
-                f"（如受伤后过了较长时间才就诊且无正当理由），请在笔录问答中加入一问，请被询问人解释延迟就诊的原因；"
-                f"若间隔合理则无需就此提问。"
-            )
-        return "\n".join(lines)
+        受伤时间 与 就诊时间 间隔明显不合理 → 请 AI 追加一问解释延迟就诊。
+
+        两个时间都填了才追加（只填一个没法比间隔）。本人提示词里已有这两行，
+        证人/法人/家属没有，故这里把两个时间都写进句子，四个角色都自洽。
+        """
+        injury = format_compact_time(case_obj.get('injury_time', ''))
+        visit = format_compact_time(case_obj.get('visit_time', ''))
+        if not (injury and visit):
+            return ""
+        return (f"本案填写的受伤时间为：{injury}，就诊时间为：{visit}。"
+                f"请判断受伤后是否在合理时间内就医：若受伤时间与就诊时间相隔明显不合理"
+                f"（如受伤后过了较长时间才就诊且无正当理由），请在笔录问答中加入一问，"
+                f"请被询问人解释延迟就诊的原因；若间隔合理则无需就此提问。")
 
     def _build_prompt_for_role(self, role: str, case_obj: dict) -> str:
         """按角色返回发给 AI 的 txt 提示词（ROLE_TALK 定 key，统一渲染并校验残留占位符）"""
