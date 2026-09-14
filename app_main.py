@@ -278,20 +278,24 @@ def format_compact_time(value: str) -> str:
 def render_prompt_template(template: str, data: Dict[str, Any], label: str = '') -> str:
     """按 data 逐个替换 {{key}} 占位符。
 
-    占位符被替换成空串、且它独占一行（形如「- 标签：{{占位符}}」）时，整行删掉——
-    否则提示词里会留下「- 称谓提示：」这种只有标签、没有内容的空壳行。
+    值为空串的占位符：在**原模板**上把它独占的那一行（形如「- 标签：{{占位符}}」）
+    连换行一起删掉——否则提示词里会留下「- 称谓提示：」这种只有标签、没有内容的
+    空壳行。删行只认原模板的形状（该占位符独占一行），与别的 key 取什么值、
+    data 的遍历顺序都无关；行内的占位符为空时只替成空串，不会吃掉半句话。
+
     替换后仍有残留 {{…}} 则告警（防止模板加了新占位符而代码未填）。
     """
+    # 第一遍：空值占位符独占的整行删掉
     for key, val in data.items():
-        if val is None:
+        if val is None or str(val) != '':
             continue
         token = '{{%s}}' % key
-        if token not in template:
-            continue
-        if str(val) == '':
-            template = re.sub(r'^[^\n{}]*' + re.escape(token) + r'[ \t]*(?:\r?\n|$)',
-                              '', template, flags=re.M)
-        template = template.replace(token, str(val))
+        template = re.sub(r'^[^\n{}]*' + re.escape(token) + r'[ \t]*(?:\r?\n|$)',
+                          '', template, flags=re.M)
+    # 第二遍：其余占位符统一替换（空值但没独占一行的，就替成空串）
+    for key, val in data.items():
+        if val is not None:
+            template = template.replace('{{%s}}' % key, str(val))
     leftovers = sorted(set(re.findall(r'\{\{([^}]*)\}\}', template)))
     if leftovers:
         logger.warning(f"⚠️ 提示词「{label}」仍有未替换占位符: {leftovers}")
