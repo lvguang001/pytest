@@ -1024,15 +1024,15 @@ class MainWindow(MainWindowUI):
         self.pushButton_7.clicked.connect(self.generate_injury_notice)
         self.pushButton_11.clicked.connect(self.approve)   # 原 _reconnect_approval_button()
         self.pushButton_ai_review.clicked.connect(self.ai_review_document)
-        # 谈话通知书：.ui 里已经接过一次，这里**再**接一次，与重构前一致
-        # （即重复连接、槽会被调用两次）——先原样保留，改不改另说
-        self.pushButton_12.clicked.connect(self.on_pushButton_12_clicked)
-        # 谈话笔录：先断开 .ui 接的那条，再接到业务方法上（与重构前一致）
-        try:
-            self.pushButton.clicked.disconnect()
-        except TypeError:
-            pass
-        self.pushButton.clicked.connect(self.on_talk_button_clicked)
+        # 下面两条在 .ui 里也各接过一次，**必须先断开再接**，否则同一个槽会挂两遍、
+        # 点一次跑两次（谈话通知书原先就是这样）。
+        for btn, slot in ((self.pushButton_12, self.on_pushButton_12_clicked),
+                          (self.pushButton, self.on_talk_button_clicked)):
+            try:
+                btn.clicked.disconnect()
+            except TypeError:
+                pass          # 没有旧连接时 PyQt 抛 TypeError，忽略
+            btn.clicked.connect(slot)
 
         # —— 右栏两个面板里的按钮（原先都是匿名控件 + lambda）——
         self.stmt_copy_btn.clicked.connect(self._copy_statement)

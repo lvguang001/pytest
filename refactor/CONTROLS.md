@@ -291,15 +291,24 @@ MainWindow   (app_main.py)        业务逻辑；信号统一在 _connect_signal
 | `pushButton_7` | `clicked` | `generate_injury_notice` |
 | `pushButton_11` | `clicked` | `approve` |
 | `pushButton_ai_review` | `clicked` | `ai_review_document` |
-| `pushButton_12` | `clicked` | `on_pushButton_12_clicked` ⚠️ **重复** |
+| `pushButton_12` | `clicked` | 先 `disconnect()` 再连 `on_pushButton_12_clicked` |
 | `pushButton` | `clicked` | 先 `disconnect()` 再连 `on_talk_button_clicked` |
 | `stmt_copy_btn` / `stmt_clear_btn` | `clicked` | `_copy_statement` / `statement_edit.clear` |
 | `mat_copy_btn` / `mat_clear_btn` / `mat_add_btn` | `clicked` | `_copy_material` / `material_list.clear` / `material_list.add_row` |
 | `_todo_timer` | `timeout` | `_refresh_todo_board`（在 `_install_todo_kanban` 里） |
 
-> ⚠️ **`pushButton_12` 被接了两次**（`.ui` 一次 + `_connect_signals` 一次），
-> 槽会被调用两次。**这是重构前就有的**，本次为保持行为一致原样保留，
-> 未做修复——要修的话单独一个提交。
+> ⚠️ **`pushButton_12` 和 `pushButton` 必须先 `disconnect()` 再连**。
+> 这两个按钮在 `ui_main_window.py` 的 `setupUi()` 里已经接过了，直接再 `connect`
+> 会让槽挂两遍。原先「谈话通知书」就中招了——实测**点一次跑 4 次**：
+> `.ui` 显式 connect 1 条 + `QMetaObject.connectSlotsByName` 按命名约定又接了 2 条
+> （`clicked()` / `clicked(bool)` 两个重载）+ `__init__` 里 1 条。现在统一
+> 「先全部断开、再接一条」，跑 1 次。
+>
+> **`connectSlotsByName` 的坑**：它会把**任何** `on_<子控件objectName>_<信号>`
+> 形状的方法自动接上。当前 `MainWindow` 里只有 `on_pushButton_12_clicked` 命中
+> （`on_talk_button_clicked`、`on_role_changed`、`on_case_type_changed`、
+> `on_id_input_finished` 都不对应任何子控件名，安全）。
+> **以后新增方法别起成这个形状**，否则会被悄悄自动连接。
 
 ### 4.3 `MaterialListWidget` 内部（`material_list.py`，不动）
 
@@ -384,6 +393,7 @@ MainWindowUI (QWidget + Ui_Form)
       已删除（建控件搬到 ui_main_build，连信号搬到 _connect_signals）
 - [x] 信号收敛到 `MainWindow._connect_signals()`（`.ui` 生成的那批未动）
 - [x] 五个匿名按钮已命名
+- [x] 修掉「谈话通知书」按钮的重复连接（点一次跑 4 次 → 1 次）
 - [x] `.ui` 之外的控件补齐 objectName
 - [x] 逐控件比对改造前后的实际坐标：除下列有意变化外，偏差均 ≤ 3px
 
@@ -396,6 +406,7 @@ MainWindowUI (QWidget + Ui_Form)
 | 身份证号右侧提示框 | 右移 4px | 由「标签坐标减 4」改为间距常量 |
 | 住址标签 | 位置不变（384） | 显式顶对齐——不这样会低 15px |
 | 各行控件 | ≤3px | 布局接管后由整数像素舍入产生 |
+| **（行为）谈话通知书按钮** | 点一次生成函数由 **4 次 → 1 次** | 修掉重复连接，见 §4.2 |
 
 ---
 
