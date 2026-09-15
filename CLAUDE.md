@@ -9,7 +9,7 @@
   多处改动用「；」分隔，大改动在正文分条列要点。参考 `git log` 已有风格
 - **注释用中文**，密度随现有代码
 - **直接提交到 `master`**（本仓库历史一直是线性直提，没有分支流程）
-- 改动前后都跑 `python -m pytest`（134 个用例，约 3 秒）
+- 改动前后都跑 `python -m pytest`（28 个用例，约 2 秒）
 
 ## 架构要点
 
@@ -68,6 +68,33 @@ _save_cases_data:  flat --pack_case()-------> 磁盘分块
 `_person_to_flat` / `_mirror_witness_to_flat` **空值也要写**——表单是该角色的唯一数据来源，
 跳过空值会导致「清空输入框」传不进去、旧值残留在笔录里。
 
+### 4. 界面：构建与业务分家，全用布局管理器
+
+主界面原先靠「Qt Designer 绝对坐标 + 十几个 `_move_xxx` 补丁函数」拼出来，
+那些补丁还带隐式的调用顺序依赖（`_move_unit_type_row` 必须最先、`_uniform_row_spacing`
+必须最后……）。现在改成：
+
+```
+MainWindowUI (ui_main_build.py)   建控件 + 用 QVBoxLayout/QHBoxLayout 摆位置，不连信号
+        ↑ 继承
+MainWindow   (app_main.py)        业务逻辑；信号统一在 _connect_signals() 里接
+```
+
+- **控件变量名是业务契约**：`app_main.py` 有 80+ 处 `self.xxx`，一个都不能改。
+  完整清单在 `refactor/CONTROLS.md`（改界面前必读）。
+- 控件尺寸钉在 `MainWindowUI._SIZES` —— 布局不改就按 `sizeHint` 收缩，各行高度全变。
+- 信号连接**只在** `MainWindow._connect_signals()`（`.ui` 生成代码里那批除外）。
+  新增信号请加在那里，别再散回各个初始化方法里——散着的时候没人看得出
+  「谈话通知书」被重复接了 4 次。
+- **`ui_main_build.py` 不许 `import app_main`**：两边会成环；而且
+  `python app_main.py` 直接启动时该模块名是 `__main__`，延迟 import "app_main"
+  会再加载一份模块、造出两个不同的类。依赖 app_main 常量的文案由
+  `MainWindow.__init__` 补。
+- **`QMetaObject.connectSlotsByName`（在 `ui_main_window.py` 末尾）会把任何
+  `on_<子控件名>_<信号>` 形状的方法自动接上**，`clicked()` / `clicked(bool)`
+  两个重载各接一条。新增方法别起成这个形状；已有的就 `disconnect()` 后再连。
+- 浮层（`api_group`、`todo_board`）仍绝对定位，但位置用 `self.width()` 算。
+
 ## 容易踩的坑
 
 - **`py_compile` 只查语法不查名字**。转换代码后必须真正 `import` 一遍：
@@ -88,9 +115,16 @@ _save_cases_data:  flat --pack_case()-------> 磁盘分块
 
 ## 写测试的约定
 
-- 纯函数放 `tests/test_case_storage.py`（无 Qt，最快）；要动界面的放 `tests/test_role_scope.py`
-- 文件类放 `tests/test_case_backup.py`；日志类放 `tests/test_log_utils.py`
+- 界面结构/外观放 `tests/test_ui_layout.py`；点出来的行为放 `tests/test_ui_behavior.py`；
+  信号连接放 `tests/test_ui_signals.py`；公共夹具与工具在 `conftest.py` / `ui_helpers.py`
 - **危险逻辑的测试要用变异验证**：把修复改回旧写法，确认对应用例真的会失败。
   写过一条「原子写入」用例只检查没留下 `.tmp`，改回截断写法照样通过——是假测试，
   后来补了「写入中途失败不毁原文件」才有牙齿
-- `BASE_PATH` 必须指向临时目录，别碰真实案卷
+- `BASE_PATH` 必须指向临时目录，别碰真实案卷。这条由 `conftest.py` 顶层保证——
+  **改路径的代码必须在 `import app_main` 之前跑**，否则 MainWindow 构造时就用了真实路径
+- **`window` 夹具必须 `show()` 一次**：布局管理器要到窗口显示时才把控件摆到位，
+  没 show 之前读到的还是 `ui_main_window.py` 里那套绝对坐标。用 `WA_DontShowOnScreen`
+  避免跑测试时真弹窗口
+- 外观基准是 `tests/ui_geometry_baseline.json`。有意改界面后重新生成：
+  `UI_BASELINE_UPDATE=1 python -m pytest tests/test_ui_layout.py -k baseline`，
+  并在提交信息里写清动了哪里、为什么

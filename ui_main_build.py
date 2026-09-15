@@ -402,7 +402,7 @@ class MainWindowUI(QWidget, Ui_Form):
         return body
 
     def _build_left_column(self):
-        left = QWidget(self)
+        left = self.left_column = QWidget(self)
         left.setObjectName("left_column")
         left.setFixedWidth(self.LEFT_W)
 
@@ -445,7 +445,8 @@ class MainWindowUI(QWidget, Ui_Form):
         box_lay.addWidget(self.label_14)
 
         # 左侧「信息提示：」与框内首行对齐（不参与行内垂直居中）
-        hint = QWidget(self)
+        hint = self.alert_hint = QWidget(self)
+        hint.setObjectName("alert_hint")
         hint_lay = QVBoxLayout(hint)
         hint_lay.setContentsMargins(0, 6, 0, 0)
         hint_lay.setSpacing(0)
@@ -546,7 +547,7 @@ class MainWindowUI(QWidget, Ui_Form):
     # —— 右栏 ——
 
     def _build_right_column(self):
-        right = QWidget(self)
+        right = self.right_column = QWidget(self)
         right.setObjectName("right_column")
         right.setFixedWidth(self.RIGHT_W)
 
