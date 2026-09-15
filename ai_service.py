@@ -377,9 +377,14 @@ class AIService:
             }
 
     def generate_transcript_from_text(self, full_text: str) -> dict:
-        """把「发送给AI的模板」渲染后的全文发给 AI，生成询问笔录。
+        """把渲染好的提示词全文发给 AI，生成询问笔录。
 
-        全文已包含角色设定、案件信息与任务指令，故作为 user prompt 一次性发送。
+        提示词的来源是 `resource/prompts/{角色}发送给AI提示词.txt`（由
+        `prompts.render_prompt_template` 填完占位符）；全文已包含角色设定、
+        案件信息与任务指令，故作为 user prompt 一次性发送。
+
+        （旧版这里对应的是 resource/模板文件/文书模板/发送给AI的模板.docx，
+          提示词外置成 txt 之后那份 docx 已无人使用。）
         """
         return self.generate_transcript("", full_text)
 

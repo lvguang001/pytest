@@ -109,7 +109,42 @@ def test_provided_materials_only_list_the_ticked_ones():
         {"name": "劳动合同", "provided": False},
         {"name": "病历", "provided": True, "notes": "x"},
     ]))
-    assert d["已提供材料"] == "身份证、病历"
+    assert "身份证" in d["已提供材料"]
+    assert "病历" in d["已提供材料"]
+    assert "劳动合同" not in d["已提供材料"], "没勾选的也列进去了"
+
+
+def test_provided_materials_carry_their_notes():
+    """★ 备注要带给 AI。
+
+    备注里常写着这份材料的问题（用户的例子：「受伤时间不在合同期限内」），
+    提示词那条「与已提供证据材料不一致的地方应追问核实」要靠它才落得实。
+    """
+    d = build_unified_template_data(_case(materials=[
+        {"name": "劳动合同", "provided": True, "notes": "受伤时间不在合同期限内"},
+        {"name": "身份证", "provided": True, "notes": ""},
+    ]))
+    assert "劳动合同（备注：受伤时间不在合同期限内）" in d["已提供材料"]
+    assert "  · 身份证" in d["已提供材料"]
+    assert "身份证（备注" not in d["已提供材料"], "没备注的别加个空括号"
+
+
+def test_material_lines_are_on_separate_lines():
+    """分行列，不用顿号连成一行——**材料名本身就可能带括号**，
+    再套一层括号就分不清哪段是备注了。"""
+    d = build_unified_template_data(_case(materials=[
+        {"name": "近亲属关系证明（户口簿/结婚证等）", "provided": True, "notes": "已收"},
+        {"name": "身份证", "provided": True, "notes": ""},
+    ]))
+    assert d["已提供材料"].count("\n") == 1, "两条材料该占两行"
+    assert "近亲属关系证明（户口簿/结婚证等）（备注：已收）" in d["已提供材料"]
+
+
+def test_no_provided_material_yields_empty_string():
+    """全没勾 → 空串。提示词里那一段用 {% if %} 包着，整段不出现（不留光杆标题）。"""
+    assert build_unified_template_data(_case(materials=[
+        {"name": "身份证", "provided": False}]))["已提供材料"] == ""
+    assert build_unified_template_data(_case())["已提供材料"] == ""
 
 
 def test_recorder_falls_back_to_the_logged_in_user():
@@ -256,3 +291,147 @@ def test_render_does_not_clobber_an_existing_transcript(tmp_path):
     finally:
         os.remove(first)
         os.remove(second)
+
+
+# ============================================================================
+# 真实的提示词 txt（它是个 Jinja 模板，改坏了要立刻发现）
+# ============================================================================
+
+def test_the_real_prompt_file_renders_cleanly():
+    """把仓库里真正的「本人发送给AI提示词.txt」渲染几遍。
+
+    不是多余的：手工核对时踩过两次 ——
+    ① 条件块被拿掉后出现「受伤时间为：，」这种病句；
+    ② 只有注释、没有正文的分支输出一个光杆标题。
+    这两条都能在这里被抓住。
+    """
+    from prompt_manager import load_prompt, render_prompt_template
+
+    case = _case(materials=[{"name": "身份证", "provided": True, "notes": "已过期"},
+                            {"name": "劳动合同", "provided": True, "notes": ""}])
+    for reg in ("第十四条第（一）项", "第十四条第（六）项", "第十五条第（二）项"):
+        text = render_prompt_template(
+            load_prompt('self_send_to_ai'),
+            prompt_fill_data("本人", {**case, "proposed_article": reg}, _flat({})),
+            "本人")
+        assert "{{" not in text and "}}" not in text, f"{reg}: 有没被替换的占位符"
+        assert "{#" not in text, f"{reg}: 注释没被吃掉"
+        assert "【案件基本信息】" in text and "【格式要求】" in text
+        # 空值/空分支残留的典型症状
+        assert "时间为：，" not in text, f"{reg}: 时间没填时出现病句"
+        assert "备注：）" not in text, f"{reg}: 空备注带出了空括号"
+        assert "：【\n" not in text, f"{reg}: 有条目只有标题没有内容"
+
+
+def test_the_real_prompt_lists_materials_with_notes():
+    """端到端确认：案卷里的备注真的进了提示词。"""
+    from prompt_manager import load_prompt, render_prompt_template
+
+    case = _case(materials=[{"name": "劳动合同", "provided": True,
+                             "notes": "受伤时间不在合同期限内"}])
+    text = render_prompt_template(
+        load_prompt('self_send_to_ai'),
+        prompt_fill_data("本人", case, _flat({})), "本人")
+    assert "劳动合同（备注：受伤时间不在合同期限内）" in text
+
+
+def test_the_real_prompt_omits_the_material_section_when_nothing_is_ticked():
+    """全没勾选时，「已提供证据材料」那一整段（含标题）都不出现。"""
+    from prompt_manager import load_prompt, render_prompt_template
+
+    case = _case(materials=[{"name": "身份证", "provided": False, "notes": "未收"}])
+    text = render_prompt_template(
+        load_prompt('self_send_to_ai'),
+        prompt_fill_data("本人", case, _flat({})), "本人")
+    assert "已提供证据材料" not in text
+
+
+# ============================================================================
+# 收尾那一行：留给被谈话人亲笔填写
+# ============================================================================
+
+#: 一段贴着真实收尾的 AI 输出：最后那个「问：以上笔录…」的答，会由末段那条
+#: 空白下划线取代（留给被谈话人亲笔写）
+_CLOSING_QA = ("问：你与公司是否签订劳动合同？\n答：签了。\n\n"
+               "问：以上笔录你是否看见，是否和你所说的一致？\n答：我看过了，和我说的一样。")
+
+
+def _template_with_tail(path):
+    """带收尾段的模板：末段是「答：」+ 一串带下划线的空白（四份真实模板都这样）"""
+    doc = Document()
+    doc.add_paragraph("xx谈话笔录")
+    doc.add_paragraph("问：听清楚了吗？")
+    doc.add_paragraph(ANCHOR_TEXT + "。")
+    doc.add_paragraph("问：模板里的样例问题一？")
+    p = doc.add_paragraph()
+    r = p.add_run("答：" + " " * 30)
+    r.underline = True
+    doc.save(str(path))
+    return str(path)
+
+
+def test_the_handwritten_tail_line_is_kept(tmp_path):
+    """★ 模板末段（「答：」+ 带下划线的空白）要留着。
+
+    那是被谈话人亲笔写「以上笔录我看过，与我说的一样」并签字的地方，
+    不能由 AI 代写。原先渲染时把锚点之后的段落**全删**，包括这一段。
+    """
+    tpl = _template_with_tail(tmp_path / "t.docx")
+    out = render_transcript(tpl, {}, _CLOSING_QA, str(tmp_path), "笔录")
+    try:
+        texts = [p.text for p in Document(out).paragraphs]
+        assert texts[-1].startswith("答：") and not texts[-1][2:].strip(), \
+            f"末段不是那条收尾空白行: {texts[-1]!r}"
+        assert "模板里的样例问题一" not in "\n".join(texts), "样例问答该删的没删"
+        assert "问：你与公司是否签订劳动合同？" in texts
+        assert "答：签了。" in texts
+    finally:
+        os.remove(out)
+
+
+def test_the_ai_answer_to_the_last_question_is_dropped(tmp_path):
+    """★ AI 对最后一个问题写的答要去掉，否则和末段那个「答：」凑成两个。"""
+    tpl = _template_with_tail(tmp_path / "t.docx")
+    out = render_transcript(tpl, {}, _CLOSING_QA, str(tmp_path), "笔录")
+    try:
+        texts = [p.text for p in Document(out).paragraphs]
+        assert "我看过了" not in "\n".join(texts), "AI 的收尾答还在"
+        assert "问：以上笔录你是否看见，是否和你所说的一致？" in texts, "问句不该跟着丢"
+        assert "答：签了。" in texts, "前面正常问答不该受影响"
+        # 「答：」三条 = 锚点那句 + 正文那答 + 末段那条收尾空白
+        assert sum(1 for t in texts if t.startswith("答：")) == 3, "「答：」的条数不对"
+        assert texts[-1].startswith("答：") and not texts[-1][2:].strip()
+    finally:
+        os.remove(out)
+
+
+def test_without_a_tail_the_ai_lines_are_appended_as_before(tmp_path):
+    """模板没有收尾段时退回原行为——别把 AI 的最后一行也丢了。"""
+    tpl = _template_with_anchor(tmp_path / "t.docx")   # 末段是「问：…」，不是收尾空白行
+    out = render_transcript(tpl, {}, "问：x？\n答：我看过了。", str(tmp_path), "笔录")
+    try:
+        assert "答：我看过了。" in [p.text for p in Document(out).paragraphs]
+    finally:
+        os.remove(out)
+
+
+def test_ai_output_ending_with_a_question_keeps_everything(tmp_path):
+    """★ 按提示词第 6 条，AI 的收尾是「问：…」而不是答。
+
+    这时**什么都不该丢**，末段那条空白答行直接接在问句后面。
+    （另一条路径——AI 没听话、还是写了答——由
+      test_the_ai_answer_to_the_last_question_is_dropped 兜着。）
+    """
+    tpl = _template_with_tail(tmp_path / "t.docx")
+    content = ("问：你与公司是否签订劳动合同？\n答：签了。\n\n"
+               "问：以上笔录你是否看过，是否和你所说的一致？")
+    out = render_transcript(tpl, {}, content, str(tmp_path), "笔录")
+    try:
+        texts = [p.text for p in Document(out).paragraphs]
+        assert texts[-1].startswith("答：") and not texts[-1][2:].strip(), "末段没接上"
+        assert "问：以上笔录你是否看过，是否和你所说的一致？" in texts, "收尾问句丢了"
+        assert "答：签了。" in texts, "正文丢了"
+        # 「答：」三条 = 锚点那句 + 正文那答 + 末段那条空白
+        assert sum(1 for t in texts if t.startswith("答：")) == 3
+    finally:
+        os.remove(out)

@@ -52,9 +52,18 @@ def build_unified_template_data(case_obj: dict, username: str = "",
     """
     elements = case_obj.get('proposed_article_elements', []) or []
     materials = case_obj.get('materials', []) or []
-    # {{已提供材料}} 只列**已勾选**的：未勾选的也列进去，AI 会以为证据已经齐了
-    material_names = [m.get('name', '') for m in materials
-                      if isinstance(m, dict) and m.get('name') and m.get('provided')]
+    # {{已提供材料}} 只列**已勾选**的：未勾选的也列进去，AI 会以为证据已经齐了。
+    # 每条带上备注——备注里常写着这份材料的问题（如「受伤时间不在合同期限内」），
+    # 提示词那条「与已提供证据材料不一致的地方应追问核实」要靠它才落得实。
+    # 分行列、不用顿号连成一行：材料名本身就可能带括号
+    # （如「近亲属关系证明（户口簿/结婚证等）」），再套括号会分不清哪段是备注。
+    material_lines = []
+    for _m in materials:
+        if not (isinstance(_m, dict) and _m.get('name') and _m.get('provided')):
+            continue
+        _note = str(_m.get('notes') or '').strip()
+        material_lines.append(f"  · {_m['name']}（备注：{_note}）" if _note
+                              else f"  · {_m['name']}")
     from services import format_compact_time
     injury_time = format_compact_time(case_obj.get('injury_time', ''))
     visit_time = format_compact_time(case_obj.get('visit_time', ''))
@@ -85,7 +94,7 @@ def build_unified_template_data(case_obj: dict, username: str = "",
         '单位名称': case_obj.get('labor_unit', ''),
         '本人身份': case_obj.get('identity', DEFAULT_IDENTITY),
         '受伤经过': case_obj.get('injury_description', ''),
-        '已提供材料': '、'.join(material_names) if material_names else '',
+        '已提供材料': '\n'.join(material_lines),
         '记录人': recorder,
         '申请人名称': case_obj.get('applicant_name', ''),
         '用户名': username,
@@ -187,9 +196,13 @@ def render_transcript(template_path: str, template_data: dict, content: str,
     步骤：
     1. docxtpl 渲染占位符
     2. 定位锚点「答：听清楚了，不申请回避」
-    3. 删掉锚点之后的模板样例问答（避免与 AI 问答重复）
-    4. 按锚点段落的格式插入 AI 每一行（15pt + 下划线）
+    3. 删掉锚点之后的模板样例问答（避免与 AI 问答重复），**但保留模板末段**
+    4. 按锚点段落的格式插入 AI 每一行（15pt + 下划线），插在末段之前
     5. 存进 out_dir，文件名带序号避让重名
+
+    **末段不动的原因**：它是「答：」+ 一串带下划线的空白，留给被谈话人亲笔写
+    「以上笔录我看过，与我说的一样」并签字——不能由 AI 代写。各模板那串空白的
+    长度是 58~66 个空格不等（作者凭手感填的），所以不另算长度，直接留用模板这一段。
     """
     if not os.path.exists(template_path):
         logger.warning(f"⚠️ 谈话模板不存在: {template_path}")
@@ -211,22 +224,31 @@ def render_transcript(template_path: str, template_data: dict, content: str,
         logger.warning(f"⚠️ 未找到锚点「{ANCHOR_TEXT}」")
         return ""
 
-    # ── 删掉锚点之后的模板样例问答 ──
+    # ── 认一下模板末段（「答：」+ 纯空白）——下面删样例时要把它留下 ──
+    tail = None
+    _last = doc.paragraphs[-1] if doc.paragraphs else None
+    if (_last is not None and _last.text.strip().startswith('答：')
+            and not _last.text.strip()[2:].strip()):
+        tail = _last
+
+    # ── 删掉锚点之后的模板样例问答（锚点与末段都保留）──
     body = doc.element.body
     anchor_elem = doc.paragraphs[anchor_index]._element
     after_anchor = False
     for child in list(body):
-        if after_anchor:
-            body.remove(child)
-        elif child is anchor_elem:
+        if child is anchor_elem:
             after_anchor = True
+        elif after_anchor and (tail is None or child is not tail._element):
+            body.remove(child)
 
-    # ── 在锚点之后插入 AI 问答 ──
-    for line in content.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        p = doc.add_paragraph()
+    # ── 插入 AI 问答（插在末段之前）──
+    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    # 末段已经提供了最后一个「答：」，AI 再写一个就成了两个
+    if tail is not None and lines and lines[-1].startswith('答：'):
+        lines = lines[:-1]
+
+    for line in lines:
+        p = tail.insert_paragraph_before() if tail is not None else doc.add_paragraph()
         if anchor_pf is not None:      # 沿用锚点段落的排版
             p.paragraph_format.alignment = anchor_pf.alignment
             p.paragraph_format.first_line_indent = anchor_pf.first_line_indent
