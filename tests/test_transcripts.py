@@ -74,11 +74,20 @@ def _case(**over):
     return base
 
 
-def test_unified_data_has_both_cn_and_en_keys():
+def test_unified_data_has_only_cn_keys():
+    """★ 只出中文 key，不要再附一份英文的。
+
+    曾经两个都有（注释写着「模板里写中文或英文占位符都能替换」）。但把
+    resource/prompts/*.txt 和全部 docx 模板里的 {{占位符}} 抠出来数过：
+    **62 个全是中文，英文那份一个用的都没有**。留着只会让人以为两套都得维护。
+    """
     d = build_unified_template_data(_case(), username="吕广")
-    assert d["本人姓名"] == "张三" and d["name"] == "张三"
-    assert d["案本号"] == d["case_id"] == "案本2026001"
+    assert d["本人姓名"] == "张三"
+    assert d["案本号"] == "案本2026001"
     assert d["用户名"] == "吕广"
+    for en in ("name", "case_id", "case_nature", "labor_unit", "employer", "site",
+               "position", "materials", "recorder", "applicant_name", "id_card"):
+        assert en not in d, f"英文 key {en} 又回来了——模板和提示词里没人用它"
 
 
 def test_compact_times_are_formatted():
@@ -90,7 +99,6 @@ def test_compact_times_are_formatted():
 def test_elements_are_joined_into_one_line():
     d = build_unified_template_data(_case())
     assert d["法律要件"] == "工作时间 + 工作场所"
-    assert d["proposed_article_elements"] == "工作时间 + 工作场所"
     assert build_unified_template_data(_case(proposed_article_elements=[]))["法律要件"] == ""
 
 
@@ -102,7 +110,6 @@ def test_provided_materials_only_list_the_ticked_ones():
         {"name": "病历", "provided": True, "notes": "x"},
     ]))
     assert d["已提供材料"] == "身份证、病历"
-    assert d["materials"] == "身份证、病历"
 
 
 def test_recorder_falls_back_to_the_logged_in_user():

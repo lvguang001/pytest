@@ -92,36 +92,7 @@ def build_unified_template_data(case_obj: dict, username: str = "",
         '当前时期': current_period or (date_now() + time_now()),
     }
 
-    # 英文 key（case_obj 字段名，兼容写法）
-    en = {
-        'case_id': case_obj.get('case_id', ''),
-        'case_nature': case_obj.get('case_nature', ''),
-        'applicant_type': case_obj.get('applicant_type', ''),
-        'employer': case_obj.get('employer', ''),
-        'labor_unit': case_obj.get('labor_unit', ''),
-        'site': case_obj.get('site', ''),
-        'apply_time': case_obj.get('apply_time', ''),
-        'accept_time': case_obj.get('accept_time', ''),
-        'injury_time': injury_time,
-        'visit_time': visit_time,
-        'proposed_article': case_obj.get('proposed_article', ''),
-        'proposed_article_elements': ' + '.join(elements) if elements else '',
-        'name': case_obj.get('name', ''),
-        'gender': case_obj.get('gender', ''),
-        'age': case_obj.get('age', ''),
-        'id_card': case_obj.get('id_card', ''),
-        'phone': case_obj.get('phone', ''),
-        'address': case_obj.get('address', ''),
-        'position': case_obj.get('position', ''),
-        'injury_description': case_obj.get('injury_description', ''),
-        'materials': '、'.join(material_names) if material_names else '',
-        'recorder': recorder,
-        'applicant_name': case_obj.get('applicant_name', ''),
-    }
-
-    merged = dict(zh)
-    merged.update(en)
-    return merged
+    return zh
 
 
 # ============================================================================
