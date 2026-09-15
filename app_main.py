@@ -1,6 +1,6 @@
 import os
 import json
-import shutil
+
 import datetime
 import logging
 from typing import Dict, List, Any, Optional
@@ -25,6 +25,7 @@ from material_list import MaterialListWidget  # noqa: F401
 from dialogs import (AIReviewResultDialog, ApprovalDecisionDialog,
                       CaseDataReviewDialog)
 import case_store
+import documents
 from services import (FileService, DataService, TemplateVariableManager,
                       CaseDataModel, PERSON_BASE_FIELDS, person_flat_key,
                       witness_seq_label, date_now, time_now, timestamp_now,
@@ -1661,7 +1662,7 @@ class MainWindow(MainWindowUI):
             file_path = os.path.join(self.current_case_folder, person_files[0])
 
             # 插入问题到文档
-            success, message = self.insert_questions_to_document(file_path, selected_questions)
+            success, message = documents.insert_questions_to_document(file_path, selected_questions)
 
             if success:
                 QMessageBox.information(dialog, "成功",
@@ -1677,66 +1678,6 @@ class MainWindow(MainWindowUI):
             traceback.print_exc()
             QMessageBox.critical(dialog, "错误", f"插入过程中发生错误：{str(e)}")
 
-    def insert_questions_to_document(self, file_path: str, questions: list) -> tuple:
-        """
-        将问题插入到Word文档中
-
-        Args:
-            file_path: Word文档路径
-            questions: 问题列表
-
-        Returns:
-            (是否成功, 消息)
-        """
-        try:
-            from docx import Document
-            from docx.shared import Pt, RGBColor
-
-            print(f"📄 正在处理文档: {file_path}")
-
-            # 打开文档
-            doc = Document(file_path)
-
-            # 查找插入位置（文档末尾）
-            # 我们可以找到最后一个段落，然后在其后插入
-
-            # 添加分隔线
-            separator = doc.add_paragraph("=" * 50)
-            separator.alignment = 1  # 居中
-
-            # 添加标题
-            title = doc.add_paragraph("AI建议补充问题：")
-            title.runs[0].bold = True
-            title.alignment = 0  # 左对齐
-
-            # 插入每个问题
-            for i, question_text in enumerate(questions, 1):
-                # 添加问题
-                question_para = doc.add_paragraph()
-                question_para.add_run(f"{i}. {question_text}")
-
-                # 添加答案占位符（带下划线）
-                answer_para = doc.add_paragraph()
-                answer_run = answer_para.add_run("答：")
-                answer_run.font.underline = True
-                answer_run.font.color.rgb = RGBColor(0, 0, 0)
-
-                # 添加空行
-                doc.add_paragraph()
-
-            # 保存文档
-            doc.save(file_path)
-
-            print(f"✅ 成功插入 {len(questions)} 个问题到文档")
-
-            return True, "插入成功"
-
-        except Exception as e:
-            logger.error(f"❌ 插入问题到文档失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return False, str(e)
-
     def on_pushButton_12_clicked(self):
         """谈话通知书按钮点击事件"""
         print("🔄 谈话通知书按钮被点击")
@@ -1745,68 +1686,13 @@ class MainWindow(MainWindowUI):
         self.generate_interview_notice_from_approval()
 
     def extract_data_from_approval_table(self, file_path):
-        """
-        从审批表Word文件中提取数据（简化版）
+        """从审批表 docx 提取数据，缺的字段用界面上的值兜底。
+
+        读表格那半在 documents.read_approval_table（纯函数，可单测）；
+        这里补的是「界面兜底」那半——它要用到公司下拉框和当前表单。
         """
         try:
-            from docx import Document
-
-            print(f"📄 开始提取审批表数据: {file_path}")
-
-            # 搜索关键词映射
-            search_mapping = {
-                '用人单位': '用人单位',
-                '职工姓名': '职工姓名',
-                '身份证号': '职工身份证号',
-                '申请时间': '申请时间',
-                '受理时间': '受理时间',
-                '受伤经过': '受伤经过',
-                '医疗诊断': '医疗证明',  # 搜索"医疗诊断"
-            }
-
-            extracted_data = {}
-            document = Document(file_path)
-
-            # 遍历所有表格
-            for table in document.tables:
-                for row in table.rows:
-                    # 遍历每个单元格
-                    for i, cell in enumerate(row.cells):
-                        cell_text = cell.text.strip()
-
-                        # 检查每个搜索词
-                        for search_term, data_field in search_mapping.items():
-                            # 如果已经找到了，跳过
-                            if data_field in extracted_data:
-                                continue
-
-                            # 检查是否包含搜索词
-                            if search_term in cell_text:
-                                print(f"✅ 找到关键词 '{search_term}'")
-
-                                # 尝试获取右边的单元格
-                                if i + 1 < len(row.cells):
-                                    right_cell = row.cells[i + 1]
-                                    right_text = right_cell.text.strip()
-
-                                    # 只有当右边单元格有内容且不是关键词时才使用
-                                    if right_text and right_text != search_term:
-                                        extracted_data[data_field] = right_text
-                                        print(f"  提取 {data_field}: {right_text}")
-                                    else:
-                                        # 右边单元格是空的，标记为红色
-                                        logger.warning(f"  ⚠️ {data_field}: 右边单元格为空")
-                                else:
-                                    logger.warning(f"  ⚠️ {data_field}: 没有右侧单元格")
-
-            print("\n📋 提取结果:")
-            required_fields = ['用人单位', '职工姓名', '职工身份证号', '申请时间', '受理时间', '受伤经过', '医疗证明']
-
-            for field in required_fields:
-                if field in extracted_data:
-                    print(f"  ✅ {field}: {extracted_data[field]}")
-                else:
-                    logger.error(f"  ❌ {field}: 未找到")
+            extracted_data = documents.read_approval_table(file_path)
 
             # 填充缺失字段
             current_date = date_now()
@@ -1821,7 +1707,7 @@ class MainWindow(MainWindowUI):
 
             if '医疗证明' not in extracted_data:
                 extracted_data['医疗证明'] = '详见医疗诊断证明'
-                print(f"  🟥 使用默认值 医疗证明: 详见医疗诊断证明")
+                print("  🟥 使用默认值 医疗证明: 详见医疗诊断证明")
 
             # 其他字段使用界面数据
             if '用人单位' not in extracted_data:
@@ -1894,17 +1780,11 @@ class MainWindow(MainWindowUI):
 
             extracted_data = self.extract_data_from_approval_table(approval_file_path)
 
-            # 处理申请时间
-            if '申请时间' in extracted_data:
-                apply_time = extracted_data['申请时间']
-                if isinstance(apply_time, str) and apply_time.isdigit() and len(apply_time) == 8:
-                    extracted_data['申请时间'] = f"{apply_time[0:4]}年{apply_time[4:6]}月{apply_time[6:8]}日"
-
-            # 处理受理时间
-            if '受理时间' in extracted_data:
-                accept_time = extracted_data['受理时间']
-                if isinstance(accept_time, str) and accept_time.isdigit() and len(accept_time) == 8:
-                    extracted_data['受理时间'] = f"{accept_time[0:4]}年{accept_time[4:6]}月{accept_time[6:8]}日"
+            # 审批表里手填的日期常是 8 位紧凑格式，补成中文日期
+            for _field in ('申请时间', '受理时间'):
+                if _field in extracted_data:
+                    extracted_data[_field] = documents.normalize_compact_date(
+                        extracted_data[_field])
 
             if not extracted_data:
                 self._set_status('提取审批表数据失败', 'red')
@@ -2465,14 +2345,11 @@ class MainWindow(MainWindowUI):
                 self._set_status('未找到该案本号的案件数据', 'red')
                 QMessageBox.warning(self, "提示", f"未在数据中找到案本号：{case_number}")
                 return
-            template_data = self._build_notice_template_data(case_obj)
+            template_data = documents.build_notice_template_data(case_obj)
 
             # 5. 按 JSON 结论选模板
             conclusion = case_obj.get('conclusion', '')
-            if conclusion == "不予认定":
-                template_name = '不予工伤认定告知书（样本）.docx'
-            else:
-                template_name = '工伤认定告知书（样本）.docx'
+            template_name = documents.notice_template_name(conclusion)
             template_path = str(path_utils.get_document_template_path(template_name))
             if not os.path.exists(template_path):
                 self._set_status(f'模板文件不存在: {template_name}', 'red')
@@ -2482,16 +2359,11 @@ class MainWindow(MainWindowUI):
             # 6. 渲染
             self._set_status('正在生成工伤告知书...', 'black')
             QApplication.processEvents()
-            from docxtpl import DocxTemplate
-            word = DocxTemplate(template_path)
-            word.render(template_data)
+            word = documents.render_template(template_path, template_data)
 
             # 7. 保存 + 打开
             name = case_obj.get('name', '') or '职工'
-            if conclusion == "不予认定":
-                notice_file_name = f"{name}不予工伤认定告知书.docx"
-            else:
-                notice_file_name = f"{name}工伤认定告知书.docx"
+            notice_file_name = documents.notice_file_name(conclusion, name)
             target_path = os.path.join(case_folder, notice_file_name)
             word.save(target_path)
             print(f"✅ 工伤告知书保存到: {target_path}")
@@ -2511,28 +2383,6 @@ class MainWindow(MainWindowUI):
             traceback.print_exc()
             self._set_status(f'生成工伤告知书失败: {str(e)}', 'red')
             QMessageBox.critical(self, "错误", f"生成工伤告知书失败:\n{str(e)}")
-
-    def _build_notice_template_data(self, case_obj: dict) -> dict:
-        """构建工伤告知书模板字典（从案件 JSON 数据）"""
-        current_date = date_now()
-        return {
-            '本人姓名': case_obj.get('name', ''),
-            '本人身份证号': case_obj.get('id_card', ''),
-            '用人单位': case_obj.get('labor_unit', ''),  # 用人单位（签合同单位）
-            '受伤经过': case_obj.get('injury_process', case_obj.get('injury_description', '详见谈话笔录')),
-            '医疗证明': case_obj.get('medical_conclusion', ''),
-            '申请时间': case_obj.get('apply_time', current_date),
-            '受理时间': case_obj.get('accept_time', current_date),
-            '当前时期': current_date + time_now(),
-            '告知日期': current_date,
-            '受理编号': case_obj.get('case_id', ''),
-            '案本号': case_obj.get('case_id', ''),
-            '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-            '本人身份': case_obj.get('identity', DEFAULT_IDENTITY),
-            '本人所属表述': person_affiliation(case_obj),
-            '认定依据句': notice_basis_sentence(
-                case_obj, deny=('不予' in str(case_obj.get('conclusion', '')))),
-        }
 
     def _apply_ui_settings(self):
         """应用UI设置"""
@@ -3391,46 +3241,15 @@ class MainWindow(MainWindowUI):
                 return
 
             # ── 5. 预处理模板：根据结论在「认定工伤/不予认定工伤」方框打勾 ──
-            import tempfile
-            import shutil
-            temp_template = os.path.join(tempfile.gettempdir(), '_temp_approval_table.docx')
-            shutil.copy2(template_path, temp_template)
-
-            from docx import Document as DocxEditor
-            doc_edit = DocxEditor(temp_template)
-            check_confirm = (conclusion == "予以认定")
-            for table in doc_edit.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        for p in cell.paragraphs:
-                            if check_confirm and "□认定工伤" in p.text:
-                                full = p.text.replace("□认定工伤", "☑认定工伤", 1)
-                            elif (not check_confirm) and "□不予认定工伤" in p.text:
-                                full = p.text.replace("□不予认定工伤", "☑不予认定工伤", 1)
-                            else:
-                                continue
-                            if p.runs:
-                                p.runs[0].text = full
-                                for r in p.runs[1:]:
-                                    r.text = ""
-                            break
-            doc_edit.save(temp_template)
+            temp_template = documents.tick_approval_box(template_path, conclusion)
 
             # ── 6. 渲染模板（仅替换带 {{}} 外框的占位符）──
-            word = DocxTemplate(temp_template)
-            word.render(template_data)
+            word = documents.render_template(temp_template, template_data)
 
-            # ── 6. 保存 ──
+            # ── 6. 保存（不覆盖已有的审批表）──
             os.makedirs(case_folder, exist_ok=True)
-
-            file_name = f"{person_name}案件审批表.docx" if person_name else "案件审批表.docx"
-            target_path = os.path.join(case_folder, file_name)
-            counter = 2
-            while os.path.exists(target_path):
-                file_name = f"{person_name}案件审批表({counter}).docx"
-                target_path = os.path.join(case_folder, file_name)
-                counter += 1
-
+            base = f"{person_name}案件审批表" if person_name else "案件审批表"
+            target_path = documents.unique_path(case_folder, base)
             word.save(target_path)
             print(f"✅ 案件审批表已保存: {target_path}")
 

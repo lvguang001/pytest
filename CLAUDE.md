@@ -9,7 +9,7 @@
   多处改动用「；」分隔，大改动在正文分条列要点。参考 `git log` 已有风格
 - **注释用中文**，密度随现有代码
 - **直接提交到 `master`**（本仓库历史一直是线性直提，没有分支流程）
-- 改动前后都跑 `python -m pytest`（114 个用例，约 2 秒）
+- 改动前后都跑 `python -m pytest`（136 个用例，约 3 秒）
 
 ## 架构要点
 
@@ -143,7 +143,8 @@ MainWindow   (app_main.py)        业务逻辑；信号统一在 _connect_signal
 ## 写测试的约定
 
 - 纯函数（最快，无 Qt）：案件数据投影与落盘放 `tests/test_case_store.py`、
-  AI 回复解析放 `tests/test_ai_service.py`、人记录 schema 与证人编号放
+  AI 回复解析放 `tests/test_ai_service.py`、文书工具箱放 `tests/test_documents.py`、
+  人记录 schema 与证人编号放
   `tests/test_services.py`；
   界面结构/外观放 `tests/test_ui_layout.py`；点出来的行为放 `tests/test_ui_behavior.py`；
   信号连接放 `tests/test_ui_signals.py`；公共夹具与工具在 `conftest.py` / `ui_helpers.py`
