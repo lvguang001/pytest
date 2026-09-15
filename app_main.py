@@ -4,10 +4,10 @@ import re
 import shutil
 import datetime
 import logging
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Dict, List, Any, Optional
 from ctypes import windll, byref, create_string_buffer, c_int32, c_uint
 import pandas as pd
-from jinja2 import Environment, StrictUndefined
+from prompt_manager import render_prompt_template
 from docx import Document
 from docxtpl import DocxTemplate
 from PyQt5.Qt import *
@@ -19,15 +19,22 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem,
 )
 from PyQt5.QtGui import QFont
-from ui_main_build import MainWindowUI
+from ui_main_build import MainWindowUI, ROLE_IDENTITY_HINT, ROLE_IDENTITY_LABEL
 # 控件类搬到了 material_list.py；这里保留一份再导出，外部 `from app_main import
 # MaterialListWidget` 的老写法仍然可用
 from material_list import MaterialListWidget  # noqa: F401
 from case_store import (SCHEMA_VERSION, is_newer_version, migrate_case,
                         pack_case, unpack_case)
-from services import FileService, DataService, TemplateVariableManager
+from services import (FileService, DataService, TemplateVariableManager,
+                      PERSON_BASE_FIELDS, person_flat_key, witness_seq_label)
 from ai_service import AIService
-from case_classifier import CaseClassifier
+from case_classifier import (
+    CaseClassifier, REGULATION_OPTIONS,
+    UNIT_TYPES, UNIT_TYPE_APPELLATION, DEFAULT_UNIT_TYPE, DEFAULT_IDENTITY,
+    compose_evidence, regulation_elements, regulation_full_to_short,
+    regulation_short_to_full, regulation_full_for_unit,
+    person_affiliation, notice_basis_sentence,
+)
 from config_service import ConfigService
 from path_utils import path_utils
 import log_utils
@@ -65,78 +72,8 @@ def _timestamp_now() -> str:
     return _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
 
-_CN_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
-
-
-def _witness_label(n: int) -> str:
-    """把序号转成中文证人编号：1→证人一, 2→证人二, 10→证人十, 11→证人十一, 21→证人二十一"""
-    if n <= 0:
-        return f"证人{n}"
-
-    if n <= 10:
-        body = _CN_DIGITS[n] if n < 10 else "十"
-    elif n < 20:
-        body = "十" + (_CN_DIGITS[n % 10] if n % 10 else "")
-    else:
-        tens = n // 10
-        ones = n % 10
-        body = _CN_DIGITS[tens] + "十" + (_CN_DIGITS[ones] if ones else "")
-
-    return f"证人{body}"
-
-
-# ============================================================================
-# 统一"人记录"schema(本人/证人/法人共用一份字段结构)
-# ============================================================================
-
-# 一份"人记录"的规范英文键。case_obj 顶层的 本人 即 role=本人 的记录；
-# 证人 / 法人 数组元素 = 同样这些字段 + role(+ 可选 seq / materials)。
-# unit = 该人自己的工作单位，各自独立（证人/家属不必与案件用人单位相同）。
-PERSON_BASE_FIELDS = ("name", "gender", "age", "id_card", "address", "phone",
-                      "position", "identity", "unit")
-
-# 案件级：用人单位性质（企业 / 机关（公务员） / 事业单位），默认企业
-UNIT_TYPES = ["企业", "机关（公务员）", "事业单位"]
-DEFAULT_UNIT_TYPE = "企业"
-DEFAULT_IDENTITY = "职工"
-
-# 单位性质 → 该单位人员的中文称谓（用于给 AI 的「称谓提示」）。
-# 下拉框的标签（如「机关（公务员）」）带括号，不能直接拼进句子里，故单独映射；企业档不提示。
-UNIT_TYPE_APPELLATION = {
-    "机关（公务员）": "机关工作人员",
-    "事业单位": "事业单位工作人员",
-}
-
-# canonical 英文键 → 中文后缀（用于拼 本人姓名/证人姓名/… 兼容扁平键）
-PERSON_CN_SUFFIX = {
-    "name": "姓名",
-    "gender": "性别",
-    "age": "年龄",
-    "id_card": "身份证号",
-    "address": "身份证地址",
-    "phone": "手机号",
-    "identity": "身份",
-    "unit": "单位名称",
-}
-# position 语义随角色：扁平兼容键 本人岗位/证人岗位/法人职务/家属岗位
-_FLAT_POSITION_SUFFIX = {"本人": "岗位", "证人": "岗位", "法人": "职务", "家属": "岗位"}
-
-# 「身份」输入行在各角色下的语义：家属填的是与死者的关系，其余填用工身份。
-# 标签一律用短词（那行要和 电话/岗位 并排，长标签会把输入框挤没），
-# 完整语义放在 tooltip 里说明。
-_ROLE_IDENTITY_LABEL = {"本人": "身份：", "证人": "身份：",
-                        "法人": "身份：", "家属": "关系："}
-_ROLE_IDENTITY_HINT = {"本人": "本人身份：职工 / 公务员 / 事业编制工作人员 等",
-                       "证人": "该谈话人身份：职工 / 公务员 / 事业编制工作人员 等",
-                       "法人": "该谈话人身份：法定代表人 / 负责人 等",
-                       "家属": "家属与死者的关系：配偶 / 子女 / 父母 等"}
-
-
-def person_flat_key(role: str, field: str) -> str:
-    """canonical 字段 → 角色前缀中文兼容扁平键，如 ('本人','name')→'本人姓名'、('法人','position')→'法人职务'"""
-    if field == "position":
-        return f"{role}{_FLAT_POSITION_SUFFIX.get(role, '岗位')}"
-    return f"{role}{PERSON_CN_SUFFIX.get(field, field)}"
+# 人记录字段与中文兼容扁平键（PERSON_BASE_FIELDS / person_flat_key /
+# witness_seq_label）见 services.py；「身份」输入行的角色文案见 ui_main_build.py。
 
 
 # 案件数据的磁盘布局：一案一文件，<BASE_PATH>/<案本号>/case.json
@@ -187,261 +124,12 @@ def format_compact_time(value: str) -> str:
     return (f"{s[0:4]}年{s[4:6]}月{s[6:8]}日{s[8:10]}时{s[10:12]}分")
 
 
-class _PromptUndefined(StrictUndefined):
-    """提示词里没拿到值的占位符。
-
-    输出位置（`{{某某}}`）原样渲染成 `{{某某}}`——跟以前一样留在提示词里，并触发
-    残留占位符告警，好一眼看出「模板加了占位符但代码没填」。
-    但用在 `{% if %}` / `{% for %}` 里会直接报错：条件里把变量名写错，宁可当场失败，
-    也不要静默当成空/假、让整块提示词悄悄消失。
-    """
-
-    def __str__(self):
-        return '{{%s}}' % self._undefined_name
-
-
-# 提示词模板引擎。trim_blocks + lstrip_blocks：{% if %} 独占一行时连那行一起消失，
-# 不做这两项会留下空行。autoescape 关掉（纯文本，不是 HTML）。
-_PROMPT_ENV = Environment(
-    undefined=_PromptUndefined,
-    autoescape=False,
-    trim_blocks=True,
-    lstrip_blocks=True,
-    keep_trailing_newline=True,
-    # 用默认的 newline_sequence='\n'：提示词文件虽是 CRLF，但 load_prompt 以文本模式读，
-    # CRLF 已被 Python 归一成 LF，渲染结果也就该是 LF（跟改造前 str.replace 一致）。
-)
-
-
-def render_prompt_template(template: str, data: Dict[str, Any], label: str = '') -> str:
-    """渲染提示词模板：`{{key}}` 填值，`{% if %}` 按条件决定整块要不要。
-
-    值为空串、且占位符独占一行（形如「- 标签：{{占位符}}」）时，整行删掉——否则会留下
-    「- 称谓提示：」这种只有标签、没有内容的空壳行。删行只认原模板的形状（该占位符独占
-    一行），与别的 key 取什么值、data 的遍历顺序都无关；行内的占位符为空时只替成空串。
-
-    值为 None 表示「代码没给这个 key 填值」：不喂给引擎，于是它在输出位置保持
-    `{{key}}` 原样并告警（而不是渲染成字符串 "None"）。
-
-    渲染后仍有残留 {{…}} 则告警（防止模板加了新占位符而代码未填）。
-    """
-    # 第一遍：空值占位符独占的整行删掉（在原模板上做，与遍历顺序无关）
-    for key, val in data.items():
-        if val is None or str(val) != '':
-            continue
-        token = '{{%s}}' % key
-        template = re.sub(r'^[^\n{}]*' + re.escape(token) + r'[ \t]*(?:\r?\n|$)',
-                          '', template, flags=re.M)
-    # 第二遍：交给模板引擎（None 的键不提供，让它按「未填」处理）
-    provided = {k: v for k, v in data.items() if v is not None}
-    rendered = _PROMPT_ENV.from_string(template).render(**provided)
-    leftovers = sorted(set(re.findall(r'\{\{([^}]*)\}\}', rendered)))
-    if leftovers:
-        logger.warning(f"⚠️ 提示词「{label}」仍有未替换占位符: {leftovers}")
-    return rendered
-
-
 # ============================================================================
-# 拟用条例 选项与格式互转（case_classifier 为单一事实源）
+# 拟用条例、单位性质与证据清单见 case_classifier.py
+#   （REGULATION_OPTIONS / REGULATION_ELEMENTS / compose_evidence /
+#    regulation_short_to_full / UNIT_TYPES / DEFAULT_IDENTITY /
+#    person_affiliation / notice_basis_sentence 等）
 # ============================================================================
-
-# 从条例目录派生：顺序 = 下拉框顺序；要素与 case_classifier 同源
-_REGULATION_CATALOG = CaseClassifier.REGULATIONS
-REGULATION_OPTIONS = list(_REGULATION_CATALOG.keys())
-REGULATION_ELEMENTS = {
-    key: list(reg.get('elements', []))
-    for key, reg in _REGULATION_CATALOG.items()
-}
-
-
-def _regulation_elements(short: str) -> list:
-    """返回拟用条例对应的法律要件列表；未知条例返回空列表"""
-    if not short:
-        return []
-    return list(REGULATION_ELEMENTS.get(short.strip(), []))
-
-
-
-
-# ============================================================================
-# 书面证据清单：条例 × 案件性质 × 申请类型 三层叠加
-# ----------------------------------------------------------------------------
-# 单看条例不够——同一个条例下，工亡案件还要死亡证明，个人申请还要劳动关系的
-# 补充证明，工亡由近亲属代为申请还要关系证明。见 compose_evidence()。
-# 「是否已提供」由材料面板的复选框承载，不在这里判断。
-# ============================================================================
-
-# L1 《条例》第18条要求的通用材料（所有工伤认定申请都要）
-_BASE_EVIDENCE_REQUIRED = ("身份证", "劳动合同", "医院诊断证明")
-
-# L3 工亡案件追加
-_DEATH_EVIDENCE_REQUIRED = ("死亡证明",)
-_DEATH_EVIDENCE_POSSIBLE = ("抢救病历（含抢救时间记录）", "死亡原因证明")
-
-# L4 个人申请追加（单位不配合时劳动关系往往要靠这些佐证；劳动合同与
-# 劳动关系裁决书都列出，勾哪个就说明是哪种情况）
-_SELF_APPLY_EVIDENCE_POSSIBLE = ("劳动关系裁决书", "单位未在规定时限内申报的证明")
-
-# L2.5 单位性质修饰：机关（公务员）/事业单位 的人员不是劳动合同关系，而是人事
-# 关系——「劳动合同」降为可能，换成各自的人事关系证明与在编证明。
-_NON_ENTERPRISE_EVIDENCE_REQUIRED = {
-    "机关（公务员）": ("公务员录用审批文件", "公务员在编证明"),
-    "事业单位": ("聘用合同", "事业单位在编证明"),
-}
-
-# L5 个人申请 + 工亡：申请人是近亲属，还要证明「有资格申请」
-_KIN_APPLY_EVIDENCE_REQUIRED = ("近亲属关系证明（户口簿/结婚证等）", "申请人身份证")
-_KIN_APPLY_EVIDENCE_POSSIBLE = ("其他近亲属授权委托书或放弃声明",)
-
-
-def compose_evidence(regulation_short: str, is_death_case: bool,
-                     is_personal_apply: bool,
-                     unit_type: str = DEFAULT_UNIT_TYPE) -> List[Tuple[str, bool]]:
-    """合成证据清单，返回 [(材料名称, 是否必要), ...]。
-
-    四个信号：拟用条例 × 单位性质 × 案件性质（工亡）× 申请类型（个人）。
-    顺序：必要在前、可能在后；同名只留一条（在两层都出现时按「必要」算）。
-    """
-    required = list(_BASE_EVIDENCE_REQUIRED)
-    possible: List[str] = []
-
-    # 非企业单位：劳动合同降为可能，换成人事关系与在编证明
-    unit_extra = _NON_ENTERPRISE_EVIDENCE_REQUIRED.get((unit_type or "").strip())
-    if unit_extra:
-        required.remove("劳动合同")
-        possible.insert(0, "劳动合同")
-        required += list(unit_extra)
-
-    reg = _REGULATION_CATALOG.get((regulation_short or "").strip(), {})
-    ev = reg.get("evidence") or {}
-    required += list(ev.get("required") or [])
-    possible += list(ev.get("possible") or [])
-
-    if is_death_case:
-        required += list(_DEATH_EVIDENCE_REQUIRED)
-        possible += list(_DEATH_EVIDENCE_POSSIBLE)
-
-    if is_personal_apply:
-        possible += list(_SELF_APPLY_EVIDENCE_POSSIBLE)
-        if is_death_case:                      # 工亡由近亲属代为申请
-            required += list(_KIN_APPLY_EVIDENCE_REQUIRED)
-            possible += list(_KIN_APPLY_EVIDENCE_POSSIBLE)
-
-    out: List[Tuple[str, bool]] = []
-    seen = set()
-    for name in required:
-        if name and name not in seen:
-            seen.add(name)
-            out.append((name, True))
-    for name in possible:
-        if name and name not in seen:
-            seen.add(name)
-            out.append((name, False))
-    return out
-
-
-_REG_CN_DIGITS = {
-    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-}
-
-
-def _cn_num_to_int(text: str):
-    """中文数字转整数：一→1，六→6，十四→14，十五→15"""
-    if not text:
-        return None
-    if text in _REG_CN_DIGITS:
-        return _REG_CN_DIGITS[text]
-    if text.startswith("十"):
-        tail = text[1:]
-        return 10 + (_REG_CN_DIGITS.get(tail, 0) if tail else 0)
-    if "十" in text:
-        tens, ones = text.split("十", 1)
-        return _REG_CN_DIGITS.get(tens, 0) * 10 + (_REG_CN_DIGITS.get(ones, 0) if ones else 0)
-    return None
-
-
-_INT_TO_CN = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五",
-              6: "六", 7: "七", 8: "八", 9: "九", 10: "十"}
-
-
-def _int_to_cn_num(n) -> str:
-    """整数转中文数字：1→一，6→六，14→十四，15→十五"""
-    if not n:
-        return ""
-    if n <= 10:
-        return _INT_TO_CN[n]
-    if n < 20:
-        tail = n - 10
-        return "十" + (_INT_TO_CN[tail] if tail else "")
-    tens = n // 10
-    ones = n % 10
-    return _INT_TO_CN[tens] + "十" + (_INT_TO_CN[ones] if ones else "")
-
-
-def _regulation_full_to_short(text: str) -> str:
-    """《工伤保险条例》第十四条第一款第一项 → 第十四条第（一）项"""
-    import re
-    if not text:
-        return ""
-    m = re.search(
-        r"第([一二三四五六七八九十]+)条第[一二三四五六七八九十]+款第([一二三四五六七八九十]+)项",
-        text,
-    )
-    if m:
-        return f"第{m.group(1)}条第（{m.group(2)}）项"
-    return text
-
-
-def _regulation_short_to_full(short: str) -> str:
-    """第十四条第（一）项 → 《工伤保险条例》第十四条第一款第一项"""
-    import re
-    if not short:
-        return ""
-    m = re.match(r"^第([一二三四五六七八九十]+)条第（([一二三四五六七八九十]+)）项$", short)
-    if m:
-        art = _cn_num_to_int(m.group(1))
-        item = _cn_num_to_int(m.group(2))
-        if art and item:
-            return f"《工伤保险条例》第{_int_to_cn_num(art)}条第一款第{_int_to_cn_num(item)}项"
-    return short
-
-
-def _unit_is_non_enterprise(unit_type: str) -> bool:
-    """单位性质是否为 机关（公务员）/事业单位（非企业）。"""
-    return (unit_type or "").strip() not in ("", DEFAULT_UNIT_TYPE)
-
-
-def _regulation_full_for_unit(unit_type: str, short: str) -> str:
-    """审批表“引用条例”表述：机关/事业单位案件在《工伤保险条例》前加“参照”。"""
-    full = _regulation_short_to_full(short or "")
-    if not full:
-        return full
-    return ("参照" + full) if _unit_is_non_enterprise(unit_type) else full
-
-
-def _person_affiliation(case_obj: dict) -> str:
-    """受伤职工“所属表述”：企业→「{单位}职工」；机关（公务员）/事业单位→按身份表述。"""
-    ut = str(case_obj.get('unit_type', DEFAULT_UNIT_TYPE) or DEFAULT_UNIT_TYPE)
-    unit = str(case_obj.get('labor_unit', '') or '')
-    ident = str(case_obj.get('identity', '') or '').strip() or DEFAULT_IDENTITY
-    if ut == "机关（公务员）":
-        return f"{unit}（机关）{ident}" if unit else f"机关（公务员）{ident}"
-    if ut == "事业单位":
-        return f"{unit}（事业单位）{ident}" if unit else f"事业单位{ident}"
-    return f"{unit}职工" if unit else "用人单位职工"
-
-
-def _notice_basis_sentence(case_obj: dict, deny: bool = False) -> str:
-    """工伤认定告知书的结论依据句（数据驱动；机关/事业单位加“参照”）。"""
-    full = _regulation_full_for_unit(
-        str(case_obj.get('unit_type', '') or ''),
-        str(case_obj.get('proposed_article', '') or ''))
-    if not full:
-        return ""
-    if deny:
-        return f"不符合{full}认定工伤之规定，拟不予认定为工伤。"
-    return f"符合{full}认定工伤之规定，现拟决定认定为工伤。"
 
 
 def _filter_provided(materials):
@@ -841,7 +529,7 @@ class MainWindow(MainWindowUI):
 
         # 初始化案件类型下拉框（全部条例情形，来自 case_classifier）
         for _short in REGULATION_OPTIONS:
-            self.comboBox.addItem(_regulation_short_to_full(_short))
+            self.comboBox.addItem(regulation_short_to_full(_short))
 
         # 初始化组合框（必须在 init_combobox_data 之后）
         self.init_comboboxes()
@@ -860,7 +548,7 @@ class MainWindow(MainWindowUI):
         # 必须等数据模型建好——填入选项会触发一次证据清单重算。
         self.unit_type_combo.addItems(UNIT_TYPES)
         self.unit_type_combo.setCurrentText(DEFAULT_UNIT_TYPE)
-        self.identity_label.setText(_ROLE_IDENTITY_LABEL["本人"])
+        self.identity_label.setText(ROLE_IDENTITY_LABEL["本人"])
         self.identity_edit.setPlaceholderText(DEFAULT_IDENTITY)
 
         # 验证模板路径（使用已获取的路径）
@@ -1067,7 +755,7 @@ class MainWindow(MainWindowUI):
         regulation_full = self.comboBox.currentText().strip()
         # 「拟用条例」例外：以下拉框为准。下拉框的改动不写回数据模型，数据模型里可能是
         # 旧值——曾经因此「改了下拉框却按旧条例保存并生成」，下拉框还会被刷回旧值。
-        regulation_short = (_regulation_full_to_short(regulation_full)
+        regulation_short = (regulation_full_to_short(regulation_full)
                             or self.get_data('拟用条例', ''))
 
         # 本人单位＝案件级用人单位。仅当前角色是「本人」时才采信「用人单位」控件里
@@ -1151,7 +839,7 @@ class MainWindow(MainWindowUI):
         """
         short = (short or "").strip()
         self.set_data('拟用条例', short, 'case')
-        full = _regulation_short_to_full(short)
+        full = regulation_short_to_full(short)
         self.set_data('引用条例', full, 'case')
         self._set_combo_or_type(self.comboBox, full)
 
@@ -1532,7 +1220,7 @@ class MainWindow(MainWindowUI):
         if not hasattr(self, "material_list"):
             return
         # 和 _collect_review_data 同一口径：以下拉框为准，数据模型里的可能是旧值
-        short = (_regulation_full_to_short(self.comboBox.currentText().strip())
+        short = (regulation_full_to_short(self.comboBox.currentText().strip())
                  or self.get_data('拟用条例', ''))
         unit_type = (self.unit_type_combo.currentText().strip()
                      if hasattr(self, 'unit_type_combo') else DEFAULT_UNIT_TYPE)
@@ -1841,7 +1529,7 @@ class MainWindow(MainWindowUI):
             "visit_time": data.get('visit_time', ''),
             "injury_time": data.get('injury_time', ''),
             "proposed_article": data.get('regulation', ''),
-            "proposed_article_elements": _regulation_elements(data.get('regulation', '')),
+            "proposed_article_elements": regulation_elements(data.get('regulation', '')),
             # ── 本人（一套完整数据）──
             "name": data.get('name', ''),
             "gender": data.get('gender', ''),
@@ -2324,7 +2012,7 @@ class MainWindow(MainWindowUI):
         # ── 条例下拉框 ──
         # 拟用条例按规范短名定位，不要用索引——增删条例会让索引整体位移，
         # 预设就静默指到别的条例上去了
-        _reg_idx = self.comboBox.findText(_regulation_short_to_full(data.get("regulation", "")))
+        _reg_idx = self.comboBox.findText(regulation_short_to_full(data.get("regulation", "")))
         if _reg_idx >= 0:
             self.comboBox.setCurrentIndex(_reg_idx)
 
@@ -2348,7 +2036,7 @@ class MainWindow(MainWindowUI):
             name = data['name_pane']
             w = next((x for x in self.data_model.witnesses if x.get('name') == name), None)
             if w is None:
-                w = {"role": "证人", "seq": _witness_label(len(self.data_model.witnesses) + 1)}
+                w = {"role": "证人", "seq": witness_seq_label(len(self.data_model.witnesses) + 1)}
                 self.data_model.witnesses.append(w)
             w.update(self._read_form_as_person())
             # 指向该证人，避免索引无效导致生成/回填拿不到证人数据
@@ -2413,9 +2101,9 @@ class MainWindow(MainWindowUI):
         # 否则切到长标签的角色会把左边的岗位输入框压住。
         if hasattr(self, 'identity_label'):
             self.identity_label.setText(
-                _ROLE_IDENTITY_LABEL.get(role, _ROLE_IDENTITY_LABEL["本人"]))
+                ROLE_IDENTITY_LABEL.get(role, ROLE_IDENTITY_LABEL["本人"]))
         if hasattr(self, 'identity_edit'):
-            self.identity_edit.setToolTip(_ROLE_IDENTITY_HINT.get(role, ""))
+            self.identity_edit.setToolTip(ROLE_IDENTITY_HINT.get(role, ""))
             # 家属这一栏无通用默认值，清掉占位符「职工」避免误读
             self.identity_edit.setPlaceholderText("" if role == "家属" else DEFAULT_IDENTITY)
 
@@ -3536,8 +3224,8 @@ class MainWindow(MainWindowUI):
             '案本号': case_obj.get('case_id', ''),
             '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
             '本人身份': case_obj.get('identity', DEFAULT_IDENTITY),
-            '本人所属表述': _person_affiliation(case_obj),
-            '认定依据句': _notice_basis_sentence(
+            '本人所属表述': person_affiliation(case_obj),
+            '认定依据句': notice_basis_sentence(
                 case_obj, deny=('不予' in str(case_obj.get('conclusion', '')))),
         }
 
@@ -3760,7 +3448,7 @@ class MainWindow(MainWindowUI):
         new_index = len(self.data_model.witnesses)
         new_witness = {
             "role": "证人",
-            "seq": _witness_label(new_index + 1),
+            "seq": witness_seq_label(new_index + 1),
             "name": "", "gender": "", "age": "",
             "id_card": "", "address": "", "phone": "", "position": "",
             "identity": "",
@@ -3776,7 +3464,7 @@ class MainWindow(MainWindowUI):
         new_index = len(self.data_model.witnesses)
         new_witness = {
             "role": "证人",
-            "seq": _witness_label(new_index + 1),
+            "seq": witness_seq_label(new_index + 1),
             "name": "", "gender": "", "age": "",
             "id_card": "", "address": "", "phone": "", "position": "",
             "identity": "",
@@ -4232,7 +3920,7 @@ class MainWindow(MainWindowUI):
                 'person_name': case_obj.get('name', ''),
                 'company_name': case_obj.get('labor_unit', ''),
                 'applicant_name': case_obj.get('applicant_name', ''),
-                'regulation': _regulation_full_for_unit(
+                'regulation': regulation_full_for_unit(
                     case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
                     case_obj.get('proposed_article', '')),
                 'folder_name': case_obj.get('folder_name', ''),

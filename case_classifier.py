@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-条例索引常量（单一事实源）
-供拟用条例下拉、案件法律要件、案件审批表使用。
+条例与证据清单（单一事实源）
+供拟用条例下拉、案件法律要件、证据清单、案件审批表、告知书使用。
 
-键 = 规范短名（如 第十四条第（一）项），即 case_obj.proposed_article 存储格式。
-每项：
+**条例目录**：键 = 规范短名（如 第十四条第（一）项），即 case_obj.proposed_article
+存储格式。每项：
 - text:     条例全称（《工伤保险条例》第X条第一款第X项）
 - desc:     法条原文（用于审批表 / AI 分析）
 - elements: 法律要件清单（案件 JSON 的 proposed_article_elements、AI 追问依据）
@@ -12,12 +12,19 @@
 
   required = 必要（缺了办不下去），possible = 可能（视案情而定）。
   只列该条例特有的——所有工伤申请通用的《条例》第18条材料
-  （身份证 / 劳动合同 / 医院诊断证明）不在这里，见 app_main.compose_evidence 的 L1。
+  （身份证 / 劳动合同 / 医院诊断证明）不在这里，见本模块 compose_evidence 的 L1。
   工亡、个人申请、家属代为申请还有各自的追加项，也在那里叠加。
 
 注：第十四条第（七）项（法律行政法规规定的其他情形）实际极少碰到，已整体移除
 （目录、下拉框、AI 判定用的对照表都去掉了）。
+
+**其余内容**（2026-09 从 app_main.py 搬来）：单位性质/身份常量、条例格式互转、
+书面证据清单 `compose_evidence`、以及由它们派生的表述句。两个模块原先一个装
+目录、一个装用法，现在合在一处。
 """
+
+import re
+from typing import List, Tuple
 
 
 class CaseClassifier:
@@ -117,3 +124,227 @@ class CaseClassifier:
             },
         },
     }
+
+
+# ============================================================================
+# 单位性质 / 身份（案件级）
+# ============================================================================
+
+# 用人单位性质（企业 / 机关（公务员） / 事业单位），默认企业
+UNIT_TYPES = ["企业", "机关（公务员）", "事业单位"]
+DEFAULT_UNIT_TYPE = "企业"
+DEFAULT_IDENTITY = "职工"
+
+# 单位性质 → 该单位人员的中文称谓（用于给 AI 的「称谓提示」）。
+# 下拉框的标签（如「机关（公务员）」）带括号，不能直接拼进句子里，故单独映射；企业档不提示。
+UNIT_TYPE_APPELLATION = {
+    "机关（公务员）": "机关工作人员",
+    "事业单位": "事业单位工作人员",
+}
+
+
+# ============================================================================
+# 拟用条例 选项与格式互转
+# ============================================================================
+
+# 从条例目录派生：顺序 = 下拉框顺序；要素与 CaseClassifier 同源
+REGULATION_CATALOG = CaseClassifier.REGULATIONS
+REGULATION_OPTIONS = list(REGULATION_CATALOG.keys())
+REGULATION_ELEMENTS = {
+    key: list(reg.get('elements', []))
+    for key, reg in REGULATION_CATALOG.items()
+}
+
+
+def regulation_elements(short: str) -> list:
+    """返回拟用条例对应的法律要件列表；未知条例返回空列表"""
+    if not short:
+        return []
+    return list(REGULATION_ELEMENTS.get(short.strip(), []))
+
+
+# ============================================================================
+# 书面证据清单：条例 × 案件性质 × 申请类型 三层叠加
+# ----------------------------------------------------------------------------
+# 单看条例不够——同一个条例下，工亡案件还要死亡证明，个人申请还要劳动关系的
+# 补充证明，工亡由近亲属代为申请还要关系证明。见 compose_evidence()。
+# 「是否已提供」由材料面板的复选框承载，不在这里判断。
+# ============================================================================
+
+# L1 《条例》第18条要求的通用材料（所有工伤认定申请都要）
+_BASE_EVIDENCE_REQUIRED = ("身份证", "劳动合同", "医院诊断证明")
+
+# L3 工亡案件追加
+_DEATH_EVIDENCE_REQUIRED = ("死亡证明",)
+_DEATH_EVIDENCE_POSSIBLE = ("抢救病历（含抢救时间记录）", "死亡原因证明")
+
+# L4 个人申请追加（单位不配合时劳动关系往往要靠这些佐证；劳动合同与
+# 劳动关系裁决书都列出，勾哪个就说明是哪种情况）
+_SELF_APPLY_EVIDENCE_POSSIBLE = ("劳动关系裁决书", "单位未在规定时限内申报的证明")
+
+# L2.5 单位性质修饰：机关（公务员）/事业单位 的人员不是劳动合同关系，而是人事
+# 关系——「劳动合同」降为可能，换成各自的人事关系证明与在编证明。
+_NON_ENTERPRISE_EVIDENCE_REQUIRED = {
+    "机关（公务员）": ("公务员录用审批文件", "公务员在编证明"),
+    "事业单位": ("聘用合同", "事业单位在编证明"),
+}
+
+# L5 个人申请 + 工亡：申请人是近亲属，还要证明「有资格申请」
+_KIN_APPLY_EVIDENCE_REQUIRED = ("近亲属关系证明（户口簿/结婚证等）", "申请人身份证")
+_KIN_APPLY_EVIDENCE_POSSIBLE = ("其他近亲属授权委托书或放弃声明",)
+
+
+def compose_evidence(regulation_short: str, is_death_case: bool,
+                     is_personal_apply: bool,
+                     unit_type: str = DEFAULT_UNIT_TYPE) -> List[Tuple[str, bool]]:
+    """合成证据清单，返回 [(材料名称, 是否必要), ...]。
+
+    四个信号：拟用条例 × 单位性质 × 案件性质（工亡）× 申请类型（个人）。
+    顺序：必要在前、可能在后；同名只留一条（在两层都出现时按「必要」算）。
+    """
+    required = list(_BASE_EVIDENCE_REQUIRED)
+    possible: List[str] = []
+
+    # 非企业单位：劳动合同降为可能，换成人事关系与在编证明
+    unit_extra = _NON_ENTERPRISE_EVIDENCE_REQUIRED.get((unit_type or "").strip())
+    if unit_extra:
+        required.remove("劳动合同")
+        possible.insert(0, "劳动合同")
+        required += list(unit_extra)
+
+    reg = REGULATION_CATALOG.get((regulation_short or "").strip(), {})
+    ev = reg.get("evidence") or {}
+    required += list(ev.get("required") or [])
+    possible += list(ev.get("possible") or [])
+
+    if is_death_case:
+        required += list(_DEATH_EVIDENCE_REQUIRED)
+        possible += list(_DEATH_EVIDENCE_POSSIBLE)
+
+    if is_personal_apply:
+        possible += list(_SELF_APPLY_EVIDENCE_POSSIBLE)
+        if is_death_case:                      # 工亡由近亲属代为申请
+            required += list(_KIN_APPLY_EVIDENCE_REQUIRED)
+            possible += list(_KIN_APPLY_EVIDENCE_POSSIBLE)
+
+    out: List[Tuple[str, bool]] = []
+    seen = set()
+    for name in required:
+        if name and name not in seen:
+            seen.add(name)
+            out.append((name, True))
+    for name in possible:
+        if name and name not in seen:
+            seen.add(name)
+            out.append((name, False))
+    return out
+
+
+# ============================================================================
+# 中文数字 ↔ 整数（条例的「第X条」「（X）项」互转）
+# ============================================================================
+
+_REG_CN_DIGITS = {
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+
+def cn_num_to_int(text: str):
+    """中文数字转整数：一→1，六→6，十四→14，十五→15"""
+    if not text:
+        return None
+    if text in _REG_CN_DIGITS:
+        return _REG_CN_DIGITS[text]
+    if text.startswith("十"):
+        tail = text[1:]
+        return 10 + (_REG_CN_DIGITS.get(tail, 0) if tail else 0)
+    if "十" in text:
+        tens, ones = text.split("十", 1)
+        return _REG_CN_DIGITS.get(tens, 0) * 10 + (_REG_CN_DIGITS.get(ones, 0) if ones else 0)
+    return None
+
+
+_INT_TO_CN = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五",
+              6: "六", 7: "七", 8: "八", 9: "九", 10: "十"}
+
+
+def int_to_cn_num(n) -> str:
+    """整数转中文数字：1→一，6→六，14→十四，15→十五"""
+    if not n:
+        return ""
+    if n <= 10:
+        return _INT_TO_CN[n]
+    if n < 20:
+        tail = n - 10
+        return "十" + (_INT_TO_CN[tail] if tail else "")
+    tens = n // 10
+    ones = n % 10
+    return _INT_TO_CN[tens] + "十" + (_INT_TO_CN[ones] if ones else "")
+
+
+def regulation_full_to_short(text: str) -> str:
+    """《工伤保险条例》第十四条第一款第一项 → 第十四条第（一）项"""
+    if not text:
+        return ""
+    m = re.search(
+        r"第([一二三四五六七八九十]+)条第[一二三四五六七八九十]+款第([一二三四五六七八九十]+)项",
+        text,
+    )
+    if m:
+        return f"第{m.group(1)}条第（{m.group(2)}）项"
+    return text
+
+
+def regulation_short_to_full(short: str) -> str:
+    """第十四条第（一）项 → 《工伤保险条例》第十四条第一款第一项"""
+    if not short:
+        return ""
+    m = re.match(r"^第([一二三四五六七八九十]+)条第（([一二三四五六七八九十]+)）项$", short)
+    if m:
+        art = cn_num_to_int(m.group(1))
+        item = cn_num_to_int(m.group(2))
+        if art and item:
+            return f"《工伤保险条例》第{int_to_cn_num(art)}条第一款第{int_to_cn_num(item)}项"
+    return short
+
+
+# ============================================================================
+# 单位性质 → 表述（审批表「引用条例」、告知书依据句、受伤职工所属表述）
+# ============================================================================
+
+def unit_is_non_enterprise(unit_type: str) -> bool:
+    """单位性质是否为 机关（公务员）/事业单位（非企业）。"""
+    return (unit_type or "").strip() not in ("", DEFAULT_UNIT_TYPE)
+
+
+def regulation_full_for_unit(unit_type: str, short: str) -> str:
+    """审批表“引用条例”表述：机关/事业单位案件在《工伤保险条例》前加“参照”。"""
+    full = regulation_short_to_full(short or "")
+    if not full:
+        return full
+    return ("参照" + full) if unit_is_non_enterprise(unit_type) else full
+
+
+def person_affiliation(case_obj: dict) -> str:
+    """受伤职工“所属表述”：企业→「{单位}职工」；机关（公务员）/事业单位→按身份表述。"""
+    ut = str(case_obj.get('unit_type', DEFAULT_UNIT_TYPE) or DEFAULT_UNIT_TYPE)
+    unit = str(case_obj.get('labor_unit', '') or '')
+    ident = str(case_obj.get('identity', '') or '').strip() or DEFAULT_IDENTITY
+    if ut == "机关（公务员）":
+        return f"{unit}（机关）{ident}" if unit else f"机关（公务员）{ident}"
+    if ut == "事业单位":
+        return f"{unit}（事业单位）{ident}" if unit else f"事业单位{ident}"
+    return f"{unit}职工" if unit else "用人单位职工"
+
+
+def notice_basis_sentence(case_obj: dict, deny: bool = False) -> str:
+    """工伤认定告知书的结论依据句（数据驱动；机关/事业单位加“参照”）。"""
+    full = regulation_full_for_unit(
+        str(case_obj.get('unit_type', '') or ''),
+        str(case_obj.get('proposed_article', '') or ''))
+    if not full:
+        return ""
+    if deny:
+        return f"不符合{full}认定工伤之规定，拟不予认定为工伤。"
+    return f"符合{full}认定工伤之规定，现拟决定认定为工伤。"

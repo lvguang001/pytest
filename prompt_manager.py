@@ -9,10 +9,15 @@
   生成」，界面上完全看不出来；宁可当场报错。
 - 动态数据用 {{...}} 标记（如 {{笔录全文}}）；4 份「发送给AI提示词」还会被 Jinja2 渲染，
   里面可以写 {% if %} / {# #}，其余几份仍由调用方用 str.replace 替换。
+- 「读」和「渲染」都在本模块：`load_prompt` 取 txt，`render_prompt_template` 填值。
+  （渲染原先在 app_main.py 里，2026-09 搬过来——它本来就只依赖 txt 内容。）
 """
 import logging
 import os
-from typing import Dict
+import re
+from typing import Any, Dict
+
+from jinja2 import Environment, StrictUndefined
 
 logger = logging.getLogger(__name__)
 
@@ -76,3 +81,61 @@ def load_prompt(key: str) -> str:
         raise PromptError(f"提示词文件是空的：{path}")
 
     return content
+
+
+# ============================================================================
+# 模板渲染（把 load_prompt 读回来的 txt 填上值）
+# ============================================================================
+
+class _PromptUndefined(StrictUndefined):
+    """提示词里没拿到值的占位符。
+
+    输出位置（`{{某某}}`）原样渲染成 `{{某某}}`——跟以前一样留在提示词里，并触发
+    残留占位符告警，好一眼看出「模板加了占位符但代码没填」。
+    但用在 `{% if %}` / `{% for %}` 里会直接报错：条件里把变量名写错，宁可当场失败，
+    也不要静默当成空/假、让整块提示词悄悄消失。
+    """
+
+    def __str__(self):
+        return '{{%s}}' % self._undefined_name
+
+
+# 提示词模板引擎。trim_blocks + lstrip_blocks：{% if %} 独占一行时连那行一起消失，
+# 不做这两项会留下空行。autoescape 关掉（纯文本，不是 HTML）。
+_PROMPT_ENV = Environment(
+    undefined=_PromptUndefined,
+    autoescape=False,
+    trim_blocks=True,
+    lstrip_blocks=True,
+    keep_trailing_newline=True,
+    # 用默认的 newline_sequence='\n'：提示词文件虽是 CRLF，但 load_prompt 以文本模式读，
+    # CRLF 已被 Python 归一成 LF，渲染结果也就该是 LF（跟改造前 str.replace 一致）。
+)
+
+
+def render_prompt_template(template: str, data: Dict[str, Any], label: str = '') -> str:
+    """渲染提示词模板：`{{key}}` 填值，`{% if %}` 按条件决定整块要不要。
+
+    值为空串、且占位符独占一行（形如「- 标签：{{占位符}}」）时，整行删掉——否则会留下
+    「- 称谓提示：」这种只有标签、没有内容的空壳行。删行只认原模板的形状（该占位符独占
+    一行），与别的 key 取什么值、data 的遍历顺序都无关；行内的占位符为空时只替成空串。
+
+    值为 None 表示「代码没给这个 key 填值」：不喂给引擎，于是它在输出位置保持
+    `{{key}}` 原样并告警（而不是渲染成字符串 "None"）。
+
+    渲染后仍有残留 {{…}} 则告警（防止模板加了新占位符而代码未填）。
+    """
+    # 第一遍：空值占位符独占的整行删掉（在原模板上做，与遍历顺序无关）
+    for key, val in data.items():
+        if val is None or str(val) != '':
+            continue
+        token = '{{%s}}' % key
+        template = re.sub(r'^[^\n{}]*' + re.escape(token) + r'[ \t]*(?:\r?\n|$)',
+                          '', template, flags=re.M)
+    # 第二遍：交给模板引擎（None 的键不提供，让它按「未填」处理）
+    provided = {k: v for k, v in data.items() if v is not None}
+    rendered = _PROMPT_ENV.from_string(template).render(**provided)
+    leftovers = sorted(set(re.findall(r'\{\{([^}]*)\}\}', rendered)))
+    if leftovers:
+        logger.warning(f"⚠️ 提示词「{label}」仍有未替换占位符: {leftovers}")
+    return rendered

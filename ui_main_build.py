@@ -34,6 +34,17 @@ from ui_main_window import Ui_Form
 from todo_board import TodoBoard
 from main import PasswordLineEdit
 
+# 「身份」输入行在各角色下的语义：家属填的是与死者的关系，其余填用工身份。
+# 标签一律用短词（那行要和 电话/岗位 并排，长标签会把输入框挤没），
+# 完整语义放在 tooltip 里说明。原先定义在 app_main.py，2026-09 搬到这里
+# ——它纯粹是界面文案（form 上是标签/tooltip），跟业务无关。
+ROLE_IDENTITY_LABEL = {"本人": "身份：", "证人": "身份：",
+                       "法人": "身份：", "家属": "关系："}
+ROLE_IDENTITY_HINT = {"本人": "本人身份：职工 / 公务员 / 事业编制工作人员 等",
+                      "证人": "该谈话人身份：职工 / 公务员 / 事业编制工作人员 等",
+                      "法人": "该谈话人身份：法定代表人 / 负责人 等",
+                      "家属": "家属与死者的关系：配偶 / 子女 / 父母 等"}
+
 
 class MainWindowUI(QWidget, Ui_Form):
     """主界面：只建控件、只摆位置。"""

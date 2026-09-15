@@ -11,6 +11,60 @@ import pandas as pd
 from typing import Dict, Any, Optional
 
 
+# ============================================================================
+# 统一"人记录"schema（本人/证人/法人/家属共用一份字段结构）
+# ----------------------------------------------------------------------------
+# 原先定义在 app_main.py 里，2026-09 搬到本模块——它描述的是数据模型约定，
+# 跟具体界面无关。app_main 的 _person_to_flat / _person_from_flat 直接用它。
+# ============================================================================
+
+# 一份"人记录"的规范英文键。case_obj 顶层的 本人 即 role=本人 的记录；
+# 证人 / 法人 数组元素 = 同样这些字段 + role(+ 可选 seq / materials)。
+# unit = 该人自己的工作单位，各自独立（证人/家属不必与案件用人单位相同）。
+PERSON_BASE_FIELDS = ("name", "gender", "age", "id_card", "address", "phone",
+                      "position", "identity", "unit")
+
+# canonical 英文键 → 中文后缀（用于拼 本人姓名/证人姓名/… 兼容扁平键）
+PERSON_CN_SUFFIX = {
+    "name": "姓名",
+    "gender": "性别",
+    "age": "年龄",
+    "id_card": "身份证号",
+    "address": "身份证地址",
+    "phone": "手机号",
+    "identity": "身份",
+    "unit": "单位名称",
+}
+# position 语义随角色：扁平兼容键 本人岗位/证人岗位/法人职务/家属岗位
+_FLAT_POSITION_SUFFIX = {"本人": "岗位", "证人": "岗位", "法人": "职务", "家属": "岗位"}
+
+_CN_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+
+
+def person_flat_key(role: str, field: str) -> str:
+    """canonical 字段 → 角色前缀中文兼容扁平键，如 ('本人','name')→'本人姓名'、('法人','position')→'法人职务'"""
+    if field == "position":
+        return f"{role}{_FLAT_POSITION_SUFFIX.get(role, '岗位')}"
+    return f"{role}{PERSON_CN_SUFFIX.get(field, field)}"
+
+
+def witness_seq_label(n: int) -> str:
+    """把序号转成中文证人编号：1→证人一, 10→证人十, 11→证人十一, 21→证人二十一"""
+    if n <= 0:
+        return f"证人{n}"
+
+    if n <= 10:
+        body = _CN_DIGITS[n] if n < 10 else "十"
+    elif n < 20:
+        body = "十" + (_CN_DIGITS[n % 10] if n % 10 else "")
+    else:
+        tens = n // 10
+        ones = n % 10
+        body = _CN_DIGITS[tens] + "十" + (_CN_DIGITS[ones] if ones else "")
+
+    return f"证人{body}"
+
+
 class DataService:
     """数据处理服务 - 负责所有数据计算、验证、转换操作"""
 
