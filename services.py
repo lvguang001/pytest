@@ -8,7 +8,7 @@ import datetime
 import logging
 import win32com.client
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 
 # ============================================================================
@@ -259,3 +259,111 @@ class TemplateVariableManager:
         """清空所有缓存（切换证人/角色等数据变化时调用，避免命中旧数据）"""
         self.variables_cache.clear()
         self.introduction_cache.clear()
+
+
+# ============================================================================
+# 日期 / 时间显示格式
+# ----------------------------------------------------------------------------
+# 原先散在 app_main.py 顶部（2026-09 搬来）。和 service_flow 里那套是两回事：
+# 那边统一 'YYYY-MM-DD' 用于期限计算，这里的中文格式是给文书和提示词看的。
+# ============================================================================
+
+def date_now() -> str:
+    """当前日期，格式：2025年01月01日"""
+    return datetime.datetime.now().strftime('%Y年%m月%d日')
+
+
+def time_now() -> str:
+    """当前时间，格式：14时30分"""
+    return datetime.datetime.now().strftime('%H时%M分')
+
+
+def timestamp_now() -> str:
+    """时间戳，格式：20250101_143000"""
+    return datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
+
+def format_compact_time(value: str) -> str:
+    """把受伤/就诊时间的紧凑格式 YYYYMMDDHHMM 变成「2026年07月20日16时20分」。
+
+    长度不是 12 位、或含非数字时原样返回（不猜、不截断）；空值返回空串。
+    月/日/时/分补零，与 _resolve_date_input 处理 申请/受理时间 的口径一致。
+    """
+    s = str(value or '').strip()
+    if len(s) != 12 or not s.isdigit():
+        return s
+    return (f"{s[0:4]}年{s[4:6]}月{s[6:8]}日{s[8:10]}时{s[10:12]}分")
+
+
+# ============================================================================
+# 案件数据模型
+# ============================================================================
+
+class CaseDataModel:
+    """案件数据模型 - 统一管理所有案件数据"""
+
+    def __init__(self):
+        self.basic_info: Dict[str, Any] = {}  # 基础个人信息
+        self.company_info: Dict[str, Any] = {}  # 公司相关信息
+        self.case_info: Dict[str, Any] = {}  # 案件信息
+        self.investigation: Dict[str, Any] = {}  # 调查信息
+        self.output_config: Dict[str, Any] = {}  # 输出配置
+        self.witnesses: List[Dict[str, Any]] = []  # 多证人数据，每项含 序号/姓名/身份证号/身份证地址/手机号/岗位/性别/年龄
+        self.current_witness_index: int = -1  # 当前正在编辑的证人下标，-1 表示无
+        self._init_default_values()
+
+    def _init_default_values(self):
+        """初始化默认值"""
+        self.case_info.update({
+            '案件性质': '工伤案件',
+            '申请类型': '单位申请'
+        })
+        self.output_config.update({
+            '当前日期': date_now(),
+            '当前时间': time_now()
+        })
+
+    def to_template_dict(self) -> Dict[str, Any]:
+        """转换为模板渲染用的字典"""
+        template_dict = {}
+
+        # 确保日期时间是最新的
+        self.output_config.update({
+            '当前日期': date_now(),
+            '当前时间': time_now()
+        })
+
+        # 按优先级合并
+        template_dict.update(self.basic_info)
+        template_dict.update(self.company_info)
+        template_dict.update(self.case_info)
+        template_dict.update(self.investigation)
+        template_dict.update(self.output_config)
+
+        return template_dict
+
+    def update_basic_info(self, role: str, data: Dict[str, Any]):
+        """更新基础信息"""
+        prefixed_data = {}
+        for key, value in data.items():
+            if not key.startswith(role):
+                new_key = f"{role}{key}" if key != "姓名" else f"{role}姓名"
+            else:
+                new_key = key
+            prefixed_data[new_key] = value
+
+        self.basic_info.update(prefixed_data)
+
+    def clear_role_data(self, role: str):
+        """清除特定角色的数据"""
+        role_prefix = role if role in ["本人", "证人", "法人", "家属"] else ""
+        if not role_prefix:
+            return
+
+        keys_to_remove = [
+            key for key in self.basic_info.keys()
+            if key.startswith(role_prefix)
+        ]
+
+        for key in keys_to_remove:
+            self.basic_info.pop(key, None)

@@ -77,6 +77,9 @@ case_store.save_all:  flat --pack_case()-------> 磁盘分块
 人记录 schema 与扁平键规则整套在 **`services.py`**（`PERSON_BASE_FIELDS` /
 `PERSON_CN_SUFFIX` / `_FLAT_POSITION_SUFFIX` / `person_flat_key`），
 2026-09 从 app_main.py 搬过去——它是数据模型约定，跟界面无关。
+同一次搬过去的还有 `CaseDataModel`（案件数据模型本身）和
+`date_now` / `time_now` / `timestamp_now` / `format_compact_time`
+（中文格式的日期显示，与 `service_flow` 那套 ISO 期限计算是两回事）。
 
 `person_flat_key(role, field)` 生成形如 `法人职务`、`家属单位名称` 的键，
 存进 `data_model.basic_info`（`_store_to_data_model` 对带角色前缀的键强制进 basic_info）。

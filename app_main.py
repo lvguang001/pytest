@@ -10,7 +10,7 @@ from prompt_manager import render_prompt_template
 from docx import Document
 from docxtpl import DocxTemplate
 from PyQt5.Qt import *
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QMessageBox, QDialog, QVBoxLayout,
     QLabel, QTextEdit, QPushButton, QHBoxLayout, QInputDialog,
@@ -22,11 +22,13 @@ from ui_main_build import MainWindowUI, ROLE_IDENTITY_HINT, ROLE_IDENTITY_LABEL
 # 控件类搬到了 material_list.py；这里保留一份再导出，外部 `from app_main import
 # MaterialListWidget` 的老写法仍然可用
 from material_list import MaterialListWidget  # noqa: F401
+from dialogs import ApprovalDecisionDialog, CaseDataReviewDialog
 import case_store
-from case_store import pack_case, unpack_case
 from services import (FileService, DataService, TemplateVariableManager,
-                      PERSON_BASE_FIELDS, person_flat_key, witness_seq_label)
-from ai_service import AIService
+                      CaseDataModel, PERSON_BASE_FIELDS, person_flat_key,
+                      witness_seq_label, date_now, time_now, timestamp_now,
+                      format_compact_time)
+from ai_service import AIService, AIWorker, TranscriptFromTemplateWorker
 from case_classifier import (
     CaseClassifier, REGULATION_OPTIONS,
     UNIT_TYPES, UNIT_TYPE_APPELLATION, DEFAULT_UNIT_TYPE, DEFAULT_IDENTITY,
@@ -49,30 +51,8 @@ logger = logging.getLogger(__name__)
 logging.getLogger('config_service').setLevel(logging.WARNING)
 
 
-# ============================================================================
-# 工具函数
-# ============================================================================
-
-def _date_now() -> str:
-    """当前日期，格式：2025年01月01日"""
-    import datetime as _dt
-    return _dt.datetime.now().strftime('%Y年%m月%d日')
-
-
-def _time_now() -> str:
-    """当前时间，格式：14时30分"""
-    import datetime as _dt
-    return _dt.datetime.now().strftime('%H时%M分')
-
-
-def _timestamp_now() -> str:
-    """时间戳，格式：20250101_143000"""
-    import datetime as _dt
-    return _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
-
-
-# 人记录字段与中文兼容扁平键（PERSON_BASE_FIELDS / person_flat_key /
-# witness_seq_label）见 services.py；「身份」输入行的角色文案见 ui_main_build.py。
+# 日期/时间显示格式、人记录字段与中文兼容扁平键、案件数据模型（CaseDataModel）
+# 都在 services.py；「身份」输入行的角色文案在 ui_main_build.py。
 
 
 # 案件数据的磁盘结构（分块格式）与落盘布局（一案一文件、备份、老档迁移）
@@ -171,279 +151,6 @@ TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(莫言)',
                 {'name': '医院诊断证明书', 'provided': True, 'notes': '右足跖骨骨折'},
                 {'name': '劳动合同', 'provided': True, 'notes': ''},
                 {'name': '考勤记录', 'provided': False, 'notes': ''}]}]
-
-
-# ============================================================================
-# AIWorker
-# ============================================================================
-
-class AIWorker(QThread):
-    """AI工作线程"""
-    finished = pyqtSignal(dict)  # 发送完成信号
-    error = pyqtSignal(str)  # 发送错误信号
-    progress = pyqtSignal(str, int)  # 发送进度信号 (消息, 进度百分比)
-
-    def __init__(self, ai_service, file_path):
-        super().__init__()
-        self.ai_service = ai_service
-        self.file_path = file_path
-
-    def run(self):
-        """线程运行的主函数"""
-        try:
-            # 第一步：提取文本
-            self.progress.emit("正在提取文档文本...", 20)
-            document_text = self.ai_service.extract_text_from_docx(self.file_path)
-
-            # 第二步：AI分析
-            self.progress.emit("正在调用DeepSeek API进行分析...", 50)
-            result = self.ai_service.analyze_legal_document(document_text)
-
-            # 第三步：完成
-            self.progress.emit("分析完成，正在生成报告...", 90)
-            self.finished.emit(result)
-
-        except Exception as e:
-            self.error.emit(str(e))
-
-class TranscriptFromTemplateWorker(QThread):
-    """把发给 AI 的提示词文本转发给 AIService 生成谈话笔录的后台线程（本人/证人/法人共用）"""
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
-
-    def __init__(self, ai_service, full_text):
-        super().__init__()
-        self.ai_service = ai_service
-        self.full_text = full_text
-
-    def run(self):
-        try:
-            result = self.ai_service.generate_transcript_from_text(self.full_text)
-            self.finished.emit(result)
-        except Exception as e:
-            self.error.emit(str(e))
-
-class CaseDataModel:
-    """案件数据模型 - 统一管理所有案件数据"""
-
-    def __init__(self):
-        self.basic_info: Dict[str, Any] = {}  # 基础个人信息
-        self.company_info: Dict[str, Any] = {}  # 公司相关信息
-        self.case_info: Dict[str, Any] = {}  # 案件信息
-        self.investigation: Dict[str, Any] = {}  # 调查信息
-        self.output_config: Dict[str, Any] = {}  # 输出配置
-        self.witnesses: List[Dict[str, Any]] = []  # 多证人数据，每项含 序号/姓名/身份证号/身份证地址/手机号/岗位/性别/年龄
-        self.current_witness_index: int = -1  # 当前正在编辑的证人下标，-1 表示无
-        self._init_default_values()
-
-    def _init_default_values(self):
-        """初始化默认值"""
-        self.case_info.update({
-            '案件性质': '工伤案件',
-            '申请类型': '单位申请'
-        })
-        self.output_config.update({
-            '当前日期': _date_now(),
-            '当前时间': _time_now()
-        })
-
-    def to_template_dict(self) -> Dict[str, Any]:
-        """转换为模板渲染用的字典"""
-        template_dict = {}
-
-        # 确保日期时间是最新的
-        self.output_config.update({
-            '当前日期': _date_now(),
-            '当前时间': _time_now()
-        })
-
-        # 按优先级合并
-        template_dict.update(self.basic_info)
-        template_dict.update(self.company_info)
-        template_dict.update(self.case_info)
-        template_dict.update(self.investigation)
-        template_dict.update(self.output_config)
-
-        return template_dict
-
-    def update_basic_info(self, role: str, data: Dict[str, Any]):
-        """更新基础信息"""
-        prefixed_data = {}
-        for key, value in data.items():
-            if not key.startswith(role):
-                new_key = f"{role}{key}" if key != "姓名" else f"{role}姓名"
-            else:
-                new_key = key
-            prefixed_data[new_key] = value
-
-        self.basic_info.update(prefixed_data)
-
-    def clear_role_data(self, role: str):
-        """清除特定角色的数据"""
-        role_prefix = role if role in ["本人", "证人", "法人", "家属"] else ""
-        if not role_prefix:
-            return
-
-        keys_to_remove = [
-            key for key in self.basic_info.keys()
-            if key.startswith(role_prefix)
-        ]
-
-        for key in keys_to_remove:
-            self.basic_info.pop(key, None)
-
-
-# ============================================================================
-# CaseDataReviewDialog — 数据核对窗口（以 JSON 文本形式显示并可编辑）
-# ============================================================================
-
-class CaseDataReviewDialog(QDialog):
-    """案件数据核对窗口。
-
-    以 JSON 文本形式展示完整案件数据，用户可直接编辑；
-    点击「保存并关闭」时解析 JSON（通过 get_case_obj() 读取），格式错误则提示且不关闭。
-    """
-
-    def __init__(self, case_obj: Dict[str, Any], parent=None):
-        super().__init__(parent)
-        self._case_obj: Optional[Dict[str, Any]] = None
-        self._build_ui(case_obj)
-
-    def _build_ui(self, case_obj):
-        self.setWindowTitle("🔍 案件数据核对")
-        self.resize(720, 800)
-        self.setMinimumSize(640, 660)
-
-        root = QVBoxLayout(self)
-
-        title = QLabel("请核对并修改案件数据（JSON 格式），改完后点「保存并关闭」")
-        title.setStyleSheet("font-size: 13px; font-weight: bold; padding: 4px;")
-        root.addWidget(title)
-
-        self.json_edit = QTextEdit()
-        self.json_edit.setFont(QFont("Consolas", 10))
-        # 展示与存盘一致的 v3 分块结构（case_info / injured_worker / witnesses / …）
-        self.json_edit.setPlainText(json.dumps(pack_case(case_obj), ensure_ascii=False, indent=2))
-        root.addWidget(self.json_edit, 1)
-
-        btns = QHBoxLayout()
-        btns.addStretch()
-
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        btns.addWidget(cancel_btn)
-
-        save_btn = QPushButton("保存并关闭")
-        save_btn.setStyleSheet(
-            "QPushButton { background-color: #27ae60; color: white; font-weight: bold; "
-            "padding: 6px 24px; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #219150; }"
-        )
-        save_btn.clicked.connect(self._on_save)
-        btns.addWidget(save_btn)
-
-        root.addLayout(btns)
-
-    def _on_save(self):
-        text = self.json_edit.toPlainText().strip()
-        try:
-            obj = json.loads(text)
-            if not isinstance(obj, dict):
-                raise ValueError("JSON 顶层必须是对象 {…}")
-            # 分块结构 → 内存 flat（用户把块删了则按原样透传，不阻断）
-            self._case_obj = unpack_case(obj)
-            self.accept()
-        except Exception as e:
-            QMessageBox.warning(self, "JSON 格式错误", f"无法解析 JSON：\n{str(e)}\n\n请修正后再保存。")
-
-    def get_case_obj(self) -> Optional[Dict[str, Any]]:
-        return self._case_obj
-
-
-class ApprovalDecisionDialog(QDialog):
-    """案件审批表 AI 分析结果对话框：认定工伤 / 不予认定工伤 / 保存"""
-
-    def __init__(self, analysis: dict, parent=None):
-        super().__init__(parent)
-        self.choice = "保存"
-        self._build_ui(analysis)
-
-    def _build_ui(self, analysis: dict):
-        self.setWindowTitle("🔍 AI 分析结果")
-        self.resize(760, 560)
-        self.setMinimumSize(640, 480)
-
-        layout = QVBoxLayout(self)
-
-        bias = analysis.get("偏向", "")
-        bias_label = QLabel(f"AI 倾向：{bias}" if bias else "AI 倾向：未知")
-        bias_label.setStyleSheet("font-size: 15px; font-weight: bold; padding: 4px;")
-        layout.addWidget(bias_label)
-
-        # 页签：综合分析 / 不予认定理由 / 诊断结论
-        tab_widget = QTabWidget()
-
-        tab1 = QWidget()
-        t1 = QVBoxLayout(tab1)
-        analysis_edit = QTextEdit()
-        analysis_edit.setReadOnly(True)
-        analysis_edit.setPlainText(analysis.get("分析", ""))
-        t1.addWidget(analysis_edit)
-        tab_widget.addTab(tab1, "综合分析")
-
-        tab2 = QWidget()
-        t2 = QVBoxLayout(tab2)
-        reason_edit = QTextEdit()
-        reason_edit.setReadOnly(True)
-        reasons = analysis.get("关键理由", []) or []
-        reason_edit.setPlainText("\n".join(f"• {r}" for r in reasons))
-        t2.addWidget(reason_edit)
-        tab_widget.addTab(tab2, "不予认定理由")
-
-        tab3 = QWidget()
-        t3 = QVBoxLayout(tab3)
-        diag_edit = QTextEdit()
-        diag_edit.setReadOnly(True)
-        diag_edit.setPlainText(analysis.get("诊断结论", ""))
-        t3.addWidget(diag_edit)
-        tab_widget.addTab(tab3, "诊断结论")
-
-        layout.addWidget(tab_widget, 1)
-
-        # 三个按钮
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-
-        save_btn = QPushButton("保存")
-        save_btn.clicked.connect(lambda: self._done("保存"))
-        btn_row.addWidget(save_btn)
-
-        no_btn = QPushButton("不予认定工伤")
-        no_btn.setStyleSheet(
-            "QPushButton { background-color: #e74c3c; color: white; font-weight: bold; "
-            "padding: 6px 20px; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #c0392b; }"
-        )
-        no_btn.clicked.connect(lambda: self._done("不予认定"))
-        btn_row.addWidget(no_btn)
-
-        yes_btn = QPushButton("认定工伤")
-        yes_btn.setStyleSheet(
-            "QPushButton { background-color: #27ae60; color: white; font-weight: bold; "
-            "padding: 6px 20px; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #219150; }"
-        )
-        yes_btn.clicked.connect(lambda: self._done("认定"))
-        btn_row.addWidget(yes_btn)
-
-        layout.addLayout(btn_row)
-
-    def _done(self, choice: str):
-        self.choice = choice
-        self.accept()
-
-    def get_choice(self) -> str:
-        return self.choice
 
 
 class MainWindow(MainWindowUI):
@@ -1254,7 +961,7 @@ class MainWindow(MainWindowUI):
             '记录人': case_obj.get('recorder', '') or self._get_current_username(),
             '申请人名称': case_obj.get('applicant_name', ''),
             '用户名': self._get_current_username(),
-            '当前时期': self.get_data('当前时期', '') or (_date_now() + _time_now()),
+            '当前时期': self.get_data('当前时期', '') or (date_now() + time_now()),
         }
 
         # 英文 key（case_obj 字段名，兼容写法）
@@ -1667,7 +1374,7 @@ class MainWindow(MainWindowUI):
         # 注意：不调用 _sync_form_to_current_witness（open_data_review 已把表单回填成本人数据，会污染证人）
         w = self._current_witness() or {}
         return {
-            '当前时期': self.get_data('当前时期', '') or (_date_now() + _time_now()),
+            '当前时期': self.get_data('当前时期', '') or (date_now() + time_now()),
             '用户名': self._get_current_username(),
             '本人姓名': case_obj.get('name', ''),
             '证人姓名': w.get('name', '') or self.get_data('证人姓名', ''),
@@ -1703,7 +1410,7 @@ class MainWindow(MainWindowUI):
     def _build_legal_template_data(self, case_obj: dict) -> dict:
         """构建法人谈话笔录模板的占位符数据"""
         return {
-            '当前时期': self.get_data('当前时期', '') or (_date_now() + _time_now()),
+            '当前时期': self.get_data('当前时期', '') or (date_now() + time_now()),
             '用户名': self._get_current_username(),
             '本人姓名': case_obj.get('name', ''),
             '法人姓名': self.get_data('法人姓名', ''),
@@ -1727,7 +1434,7 @@ class MainWindow(MainWindowUI):
         """
         fam_unit = self.get_data('家属单位名称', '')
         return {
-            '当前时期': self.get_data('当前时期', '') or (_date_now() + _time_now()),
+            '当前时期': self.get_data('当前时期', '') or (date_now() + time_now()),
             '用户名': self._get_current_username(),
             '本人姓名': case_obj.get('name', ''),      # 死者姓名
             '家属姓名': self.get_data('家属姓名', ''),
@@ -2178,7 +1885,7 @@ class MainWindow(MainWindowUI):
                     logger.error(f"  ❌ {field}: 未找到")
 
             # 填充缺失字段
-            current_date = _date_now()
+            current_date = date_now()
 
             if '申请时间' not in extracted_data:
                 extracted_data['申请时间'] = current_date
@@ -2210,7 +1917,7 @@ class MainWindow(MainWindowUI):
             traceback.print_exc()
 
             # 返回最小可用数据
-            current_date = _date_now()
+            current_date = date_now()
             return {
                 '用人单位': self.company_pane.currentText().strip() or '未知公司',
                 '职工姓名': self.get_data('本人姓名', '') or self.name_pane.text().strip() or '未知',
@@ -2294,7 +2001,7 @@ class MainWindow(MainWindowUI):
             self._set_status('审批表数据提取成功', 'green')
 
             # 5. 准备模板数据
-            current_date = _date_now()
+            current_date = date_now()
 
             # 使用docxtpl的RichText来设置红色
             from docxtpl import RichText
@@ -2307,7 +2014,7 @@ class MainWindow(MainWindowUI):
                 '受伤经过': extracted_data.get('受伤经过', '详见谈话笔录'),
                 '当前时期': current_date,
                 '当前日期': current_date,
-                '当前时间': _time_now(),
+                '当前时间': time_now(),
                 '案本号': self.get_data('案本号', '')
             }
 
@@ -2458,7 +2165,7 @@ class MainWindow(MainWindowUI):
         """把输入框内容解析为日期字符串；为空时返回系统当前日期（用于 申请/受理时间）"""
         raw = (raw_value or "").strip()
         if not raw:
-            return _date_now()
+            return date_now()
         # 8位纯数字 → YYYY年MM月DD日
         if raw.isdigit() and len(raw) == 8:
             return f"{raw[0:4]}年{raw[4:6]}月{raw[6:8]}日"
@@ -2873,7 +2580,7 @@ class MainWindow(MainWindowUI):
             return
 
         person_name = self.get_data('本人姓名', '未知')
-        timestamp = _timestamp_now()
+        timestamp = timestamp_now()
         filename = f"{person_name}_AI审查报告_{timestamp}.txt"
         filepath = os.path.join(self.current_case_folder, filename)
 
@@ -2989,7 +2696,7 @@ class MainWindow(MainWindowUI):
 
     def _build_notice_template_data(self, case_obj: dict) -> dict:
         """构建工伤告知书模板字典（从案件 JSON 数据）"""
-        current_date = _date_now()
+        current_date = date_now()
         return {
             '本人姓名': case_obj.get('name', ''),
             '本人身份证号': case_obj.get('id_card', ''),
@@ -2998,7 +2705,7 @@ class MainWindow(MainWindowUI):
             '医疗证明': case_obj.get('medical_conclusion', ''),
             '申请时间': case_obj.get('apply_time', current_date),
             '受理时间': case_obj.get('accept_time', current_date),
-            '当前时期': current_date + _time_now(),
+            '当前时期': current_date + time_now(),
             '告知日期': current_date,
             '受理编号': case_obj.get('case_id', ''),
             '案本号': case_obj.get('case_id', ''),
@@ -3558,8 +3265,8 @@ class MainWindow(MainWindowUI):
         """处理特殊键的同步逻辑"""
         if key == "当前时期":
             if not value:
-                current_date = _date_now()
-                current_time = _time_now()
+                current_date = date_now()
+                current_time = time_now()
                 self.set_data(key, f"{current_date}{current_time}", 'output')
 
     def _detect_data_category(self, key: str) -> str:
@@ -4009,7 +3716,7 @@ class MainWindow(MainWindowUI):
             if ret == 65:
                 return
             dll.SDT_ClosePort(port)
-            self.set_data('当前时期', _date_now() + _time_now(), 'output')
+            self.set_data('当前时期', date_now() + time_now(), 'output')
 
             role = self.get_current_role_type()
             self.process_id(pucCHMsg, role)

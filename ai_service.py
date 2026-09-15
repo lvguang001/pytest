@@ -4,6 +4,7 @@ import logging
 
 import requests
 from docx import Document
+from PyQt5.QtCore import QThread, pyqtSignal
 
 from prompt_manager import load_prompt
 
@@ -404,3 +405,58 @@ class AIService:
                 except Exception:
                     pass
         return {"错误": "无法解析AI返回的JSON", "原始": (content or "")[:500]}
+
+# ============================================================================
+# 后台线程包装（把阻塞的 API 调用丢出界面线程）
+# ----------------------------------------------------------------------------
+# 原先定义在 app_main.py 里（2026-09 搬过来）。它们只依赖 AIService 的接口，
+# 放这里是为了跟被包装的服务挨着；代价是本模块从「纯 requests」变成依赖 PyQt5
+# ——本项目只有 app_main 用它，没有别的入口会因此被拖进 Qt。
+# ============================================================================
+
+class AIWorker(QThread):
+    """AI工作线程"""
+    finished = pyqtSignal(dict)  # 发送完成信号
+    error = pyqtSignal(str)  # 发送错误信号
+    progress = pyqtSignal(str, int)  # 发送进度信号 (消息, 进度百分比)
+
+    def __init__(self, ai_service, file_path):
+        super().__init__()
+        self.ai_service = ai_service
+        self.file_path = file_path
+
+    def run(self):
+        """线程运行的主函数"""
+        try:
+            # 第一步：提取文本
+            self.progress.emit("正在提取文档文本...", 20)
+            document_text = self.ai_service.extract_text_from_docx(self.file_path)
+
+            # 第二步：AI分析
+            self.progress.emit("正在调用DeepSeek API进行分析...", 50)
+            result = self.ai_service.analyze_legal_document(document_text)
+
+            # 第三步：完成
+            self.progress.emit("分析完成，正在生成报告...", 90)
+            self.finished.emit(result)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class TranscriptFromTemplateWorker(QThread):
+    """把发给 AI 的提示词文本转发给 AIService 生成谈话笔录的后台线程（本人/证人/法人共用）"""
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, ai_service, full_text):
+        super().__init__()
+        self.ai_service = ai_service
+        self.full_text = full_text
+
+    def run(self):
+        try:
+            result = self.ai_service.generate_transcript_from_text(self.full_text)
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
