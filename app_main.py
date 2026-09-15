@@ -120,27 +120,155 @@ def _to_full_materials(provided_materials):
 # F2 测试数据预设（按 F2 轮换）
 # ============================================================================
 
-# F2 循环键。目前只留一条（本人·莫言）用于试生成笔录；原先的
-# 工亡/证人/法人/机关公务员/事业单位几条预设已按需删除，需要时从 git 历史取回。
-TEST_DATA_PRESETS = [{'name': '单位申请×工伤 本人(莫言)',
-  'role': '本人',
-  'deathCaseCheckbox': False,
-  'personalApplicationCheckbox': False,
-  'name_pane': '莫言',
-  'idnumer_pane': '330324199003151234',
-  'textEdit': '浙江省永嘉县瓯北街道XX路88号',
-  'lineEdit_4': '13888880001',
-  'lineEdit_5': '泥水工',
-  'injured_worker': '莫言',
-  'regulation': '第十四条第（一）项',
-  'company_pane': '温州YY建筑劳务有限公司',
-  'construction_company': '永嘉县XX建设工程有限公司',
-  'construction_plant': 'ZZ新城项目一期工地',
-  'statement_edit': '我单位职工莫言，男，1990年3月15日出生，身份证号330324199003151234。2026年7月20日16时20分许，莫言在工地3号楼5层搬运水泥时被滑落的水泥袋砸伤右脚，诊断为右足跖骨骨折。属工作时间工作场所因工作原因受伤，单位申请认定工伤。',
-  'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
-                {'name': '医院诊断证明书', 'provided': True, 'notes': '右足跖骨骨折'},
-                {'name': '劳动合同', 'provided': True, 'notes': ''},
-                {'name': '考勤记录', 'provided': False, 'notes': ''}]}]
+# F2 循环键：六条各一份，用来试《本人发送给AI提示词》里【分类案件的要求】的分支。
+# 每份的 regulation 必须与情形对得上（案件陈述也要写成那一项的样子），
+# 否则 AI 生成的内容和条例不匹配，测不出分支效果。
+# 其余角色（工亡/证人/法人/机关公务员/事业单位）的预设已按需删除，需要时从 git 历史取回。
+TEST_DATA_PRESETS = [
+  {'name': '（一）工作时间场所受伤',
+   'role': '本人',
+   'deathCaseCheckbox': False,
+   'personalApplicationCheckbox': False,
+   'name_pane': '莫言',
+   'idnumer_pane': '330324199003151234',
+   'textEdit': '浙江省永嘉县瓯北街道XX路88号',
+   'lineEdit_4': '13888880001',
+   'lineEdit_5': '泥水工',
+   'injured_worker': '莫言',
+   'regulation': '第十四条第（一）项',
+   'company_pane': '温州YY建筑劳务有限公司',
+   'construction_company': '永嘉县XX建设工程有限公司',
+   'construction_plant': 'ZZ新城项目一期工地',
+   'injury_time': '202607201620',
+   'visit_time': '202607201700',
+   'statement_edit': '我单位职工莫言，男，1990年3月15日出生，身份证号330324199003151234。2026年7月20日16时20分许，莫言在工地3号楼5层搬运水泥时被滑落的水泥袋砸伤右脚，诊断为右足跖骨骨折。属工作时间工作场所因工作原因受伤，单位申请认定工伤。',
+   'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                 {'name': '医院诊断证明书', 'provided': True, 'notes': '右足跖骨骨折'},
+                 {'name': '劳动合同', 'provided': True, 'notes': ''},
+                 {'name': '考勤记录', 'provided': False, 'notes': ''}]},
+
+  # 要点：时间在上班前 + 做的是开工前的准备工作（两件事都要能问出来）
+  {'name': '（二）班前准备时受伤',
+   'role': '本人',
+   'deathCaseCheckbox': False,
+   'personalApplicationCheckbox': False,
+   'name_pane': '李四',
+   'idnumer_pane': '330324198506122311',
+   'textEdit': '浙江省永嘉县三江街道YY路12号',
+   'lineEdit_4': '13888880002',
+   'lineEdit_5': '钢筋工',
+   'injured_worker': '李四',
+   'regulation': '第十四条第（二）项',
+   'company_pane': '温州YY建筑劳务有限公司',
+   'construction_company': '永嘉县XX建设工程有限公司',
+   'construction_plant': 'ZZ新城项目一期工地',
+   'injury_time': '202608030720',
+   'visit_time': '202608030810',
+   'statement_edit': '我单位职工李四，男，1985年6月12日出生，身份证号330324198506122311。单位规定上午8时上班。2026年8月3日早上7时20分许，李四提前到岗，在工地库房领取当班要用的钢筋工具和扎丝时，靠墙立着的钢管滑落砸伤左小腿，诊断为左胫骨骨裂。他是在开工前做准备工作时受的伤。',
+   'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                 {'name': '医院诊断证明书', 'provided': True, 'notes': '左胫骨骨裂'},
+                 {'name': '劳动合同', 'provided': True, 'notes': ''},
+                 {'name': '派工单或工作安排记录', 'provided': True, 'notes': '当班派工单'},
+                 {'name': '考勤记录', 'provided': True, 'notes': '7:15 到岗打卡'}]},
+
+  # 要点：暴力必须与"履行工作职责"有因果关系（私人恩怨则不认定）
+  {'name': '（三）履职受暴力伤害',
+   'role': '本人',
+   'deathCaseCheckbox': False,
+   'personalApplicationCheckbox': False,
+   'name_pane': '王五',
+   'idnumer_pane': '330324198811203456',
+   'textEdit': '浙江省永嘉县瓯北街道ZZ路5号',
+   'lineEdit_4': '13888880003',
+   'lineEdit_5': '安全员',
+   'injured_worker': '王五',
+   'regulation': '第十四条第（三）项',
+   'company_pane': '温州YY建筑劳务有限公司',
+   'construction_company': '永嘉县XX建设工程有限公司',
+   'construction_plant': 'ZZ新城项目一期工地',
+   'injury_time': '202608100930',
+   'visit_time': '202608101015',
+   'statement_edit': '我单位职工王五，男，1988年11月20日出生，身份证号330324198811203456，是工地安全员。2026年8月10日9时30分许，王五在工地大门口按岗位职责劝阻一名未佩戴安全帽的工人进场，对方不服管理，与王五争执后将其推倒在地，致王五右肘部骨折。双方此前并不相识、没有私人纠纷，冲突是因王五执行安全管理职责引起的。',
+   'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                 {'name': '医院诊断证明书', 'provided': True, 'notes': '右肘部骨折'},
+                 {'name': '劳动合同', 'provided': True, 'notes': ''},
+                 {'name': '公安报案回执', 'provided': True, 'notes': '已报案'}]},
+
+  # 要点：这一项不是"事故"而是长期接触造成的，问法与其余各项完全不同；
+  #       受伤/就诊时间填诊断与首次就诊日期。
+  {'name': '（四）职业病（矽肺）',
+   'role': '本人',
+   'deathCaseCheckbox': False,
+   'personalApplicationCheckbox': False,
+   'name_pane': '赵六',
+   'idnumer_pane': '330324197204085678',
+   'textEdit': '浙江省永嘉县桥头镇XX路33号',
+   'lineEdit_4': '13888880004',
+   'lineEdit_5': '石材打磨工',
+   'injured_worker': '赵六',
+   'regulation': '第十四条第（四）项',
+   'company_pane': '温州XX石材加工有限公司',
+   'construction_company': '温州XX石材加工有限公司',
+   'construction_plant': '桥头镇石材加工车间',
+   'injury_time': '202607010900',
+   'visit_time': '202607160900',
+   'statement_edit': '我单位职工赵六，男，1972年4月8日出生，身份证号330324197204085678。赵六自2008年起在本单位从事石材打磨工作，长期在粉尘环境中作业。2026年6月职业健康检查发现肺部异常，7月16日经温州市职业病诊断机构诊断为矽肺壹期（职业病诊断证明书编号XXXX）。属患职业病。',
+   'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                 {'name': '职业病诊断证明', 'provided': True, 'notes': '矽肺壹期'},
+                 {'name': '职业史与职业病危害接触史证明', 'provided': True, 'notes': '2008年至今'},
+                 {'name': '工作场所职业病危害因素检测报告', 'provided': False, 'notes': '待补'},
+                 {'name': '职业健康监护档案', 'provided': True, 'notes': ''},
+                 {'name': '劳动合同', 'provided': True, 'notes': ''}]},
+
+  # 要点：必须同时落实「因工外出」和「受伤时正在办这件事」
+  {'name': '（五）因工外出期间受伤',
+   'role': '本人',
+   'deathCaseCheckbox': False,
+   'personalApplicationCheckbox': False,
+   'name_pane': '孙七',
+   'idnumer_pane': '330324199101256789',
+   'textEdit': '浙江省永嘉县南城街道AA路7号',
+   'lineEdit_4': '13888880005',
+   'lineEdit_5': '现场技术员',
+   'injured_worker': '孙七',
+   'regulation': '第十四条第（五）项',
+   'company_pane': '永嘉县XX建设工程有限公司',
+   'construction_company': '永嘉县XX建设工程有限公司',
+   'construction_plant': '江西XX项目工地',
+   'injury_time': '202608181500',
+   'visit_time': '202608181610',
+   'statement_edit': '我单位职工孙七，男，1991年1月25日出生，身份证号330324199101256789，现场技术员。2026年8月18日，孙七受单位指派前往江西省XX项目工地做现场技术指导（出差审批单编号XXXX），当日15时许在查看脚手架搭设情况时踩空坠落，致左踝骨折。出差期间的交通与食宿均由单位安排。',
+   'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                 {'name': '医院诊断证明书', 'provided': True, 'notes': '左踝骨折'},
+                 {'name': '因工外出证明（出差审批单/派工单）', 'provided': True, 'notes': '出差审批单'},
+                 {'name': '交通票据', 'provided': True, 'notes': '往返高铁票'},
+                 {'name': '劳动合同', 'provided': True, 'notes': ''}]},
+
+  # 要点：住址要具体（这条的【分类案件的要求】会问现住址核实上下班路线）；
+  #       责任划分落在"非本人主要责任"上。
+  {'name': '（六）上下班途中交通事故',
+   'role': '本人',
+   'deathCaseCheckbox': False,
+   'personalApplicationCheckbox': False,
+   'name_pane': '周八',
+   'idnumer_pane': '330324199403078901',
+   'textEdit': '浙江省永嘉县瓯北街道BB路18号3单元502室',
+   'lineEdit_4': '13888880006',
+   'lineEdit_5': '木工',
+   'injured_worker': '周八',
+   'regulation': '第十四条第（六）项',
+   'company_pane': '温州YY建筑劳务有限公司',
+   'construction_company': '永嘉县XX建设工程有限公司',
+   'construction_plant': 'ZZ新城项目一期工地',
+   'injury_time': '202608201810',
+   'visit_time': '202608201900',
+   'statement_edit': '我单位职工周八，男，1994年3月7日出生，身份证号330324199403078901，现住永嘉县瓯北街道BB路18号3单元502室。2026年8月20日18时10分下班后，周八骑电动自行车沿瓯北大道由东向西回家，行至XX路口时被一辆闯红灯的小型客车撞倒，致右腿骨折。交警认定对方负事故全部责任，周八无责任（道路交通事故认定书编号XXXX）。',
+   'materials': [{'name': '身份证复印件', 'provided': True, 'notes': ''},
+                 {'name': '医院诊断证明书', 'provided': True, 'notes': '右腿骨折'},
+                 {'name': '道路交通事故认定书', 'provided': True, 'notes': '对方全责'},
+                 {'name': '上下班路线与时间合理性证明（居住证明/考勤）', 'provided': True, 'notes': '居住证明+考勤'},
+                 {'name': '劳动合同', 'provided': True, 'notes': ''}]},
+]
 
 
 class MainWindow(MainWindowUI):
@@ -1240,6 +1368,15 @@ class MainWindow(MainWindowUI):
         self.textEdit.setPlainText(data["textEdit"])
         self.lineEdit_4.setText(data["lineEdit_4"])
         self.lineEdit_5.setText(data["lineEdit_5"])
+
+        # 四个时间字段：预设里没给就清空——否则会沿用上一条的残余，
+        # 而【所有案件的要求】那段是按 受伤/就诊时间 决定要不要出现的
+        for _attr, _key in (('apply_time_edit', 'apply_time'),
+                            ('accept_time_edit', 'accept_time'),
+                            ('injury_time_edit', 'injury_time'),
+                            ('visit_time_edit', 'visit_time')):
+            if hasattr(self, _attr):
+                getattr(self, _attr).setText(data.get(_key, ''))
         # 案本号：切到本人时清空（输入新姓名后自动生成）；切到证人/法人保留同一案本号
         if data["role"] == "本人":
             self.lineEdit_2.clear()
