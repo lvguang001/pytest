@@ -6,12 +6,13 @@
 """
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit,
-    QWidget, QTabWidget, QMessageBox,
+    QWidget, QTabWidget, QMessageBox, QListWidget, QListWidgetItem,
 )
 
 from case_store import pack_case, unpack_case
@@ -164,3 +165,138 @@ class ApprovalDecisionDialog(QDialog):
 
     def get_choice(self) -> str:
         return self.choice
+
+
+class AIReviewResultDialog(QDialog):
+    """AI 法律审查结果窗口：审查结果 / 缺失问题两个页签，可勾选问题插进笔录。
+
+    原先这段是 `MainWindow.show_ai_review_result()` 里 129 行现场构建代码，而且
+    把问题列表控件挂到 MainWindow 上（`self.question_list_widget`），再让
+    `insert_selected_questions` 回头去读它——2026-09 收进这个类，列表控件归它自己。
+
+    三个动作通过信号抛回调用方（插入 / 复制 / 保存），对话框本身不碰业务。
+    """
+
+    insertRequested = pyqtSignal()
+    copyRequested = pyqtSignal(str)
+    saveRequested = pyqtSignal(dict)
+
+    def __init__(self, parsed_result: dict, parent=None):
+        super().__init__(parent)
+        self.parsed_result = parsed_result
+        self._build_ui(parsed_result)
+
+    def _build_ui(self, parsed_result: dict):
+        self.setWindowTitle("AI法律审查结果")
+        self.resize(700, 600)
+
+        layout = QVBoxLayout(self)
+
+        # 标题
+        title = QLabel("AI法律审查报告")
+        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        # 创建标签页
+        tab_widget = QTabWidget()
+
+        # 标签1：审查结果
+        review_tab = QWidget()
+        review_layout = QVBoxLayout()
+
+        review_label = QLabel("审查结果分析：")
+        review_label.setStyleSheet("font-weight: bold;")
+        review_layout.addWidget(review_label)
+
+        # 审查结果显示区域
+        review_text_edit = QTextEdit()
+        review_text_edit.setReadOnly(True)
+        review_text_edit.setPlainText(parsed_result["审查结果"])
+        review_text_edit.setMinimumHeight(300)
+        review_layout.addWidget(review_text_edit)
+
+        review_tab.setLayout(review_layout)
+        tab_widget.addTab(review_tab, "审查结果")
+
+        # 标签2：缺失问题（如果有）
+        if parsed_result["缺失问题"]:
+            questions_tab = QWidget()
+            questions_layout = QVBoxLayout()
+
+            questions_label = QLabel(f"发现 {len(parsed_result['缺失问题'])} 个缺失问题，请勾选需要添加到笔录的问题：")
+            questions_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
+            questions_layout.addWidget(questions_label)
+
+            # 创建问题列表（带复选框）
+            self.question_list_widget = QListWidget()
+
+            for question in parsed_result["缺失问题"]:
+                item = QListWidgetItem(question)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked)  # 默认未选中
+                self.question_list_widget.addItem(item)
+
+            questions_layout.addWidget(self.question_list_widget)
+
+            # 全选/全不选按钮
+            select_buttons_layout = QHBoxLayout()
+
+            btn_select_all = QPushButton("全选")
+            btn_select_all.clicked.connect(lambda: self.select_all_questions(True))
+
+            btn_select_none = QPushButton("全不选")
+            btn_select_none.clicked.connect(lambda: self.select_all_questions(False))
+
+            select_buttons_layout.addWidget(btn_select_all)
+            select_buttons_layout.addWidget(btn_select_none)
+            select_buttons_layout.addStretch()
+
+            questions_layout.addLayout(select_buttons_layout)
+
+            questions_tab.setLayout(questions_layout)
+            tab_widget.addTab(questions_tab, f"缺失问题 ({len(parsed_result['缺失问题'])})")
+
+        layout.addWidget(tab_widget)
+
+        # 按钮区域
+        button_layout = QHBoxLayout()
+
+        # 插入到笔录按钮（只在有问题时显示）
+        if parsed_result.get("缺失问题"):
+            btn_insert = QPushButton("插入选中问题到笔录")
+            btn_insert.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+            btn_insert.clicked.connect(self.insertRequested.emit)
+            button_layout.addWidget(btn_insert)
+
+        btn_copy = QPushButton("复制结果")
+        btn_copy.clicked.connect(lambda: self.copyRequested.emit(parsed_result["审查结果"]))
+
+        btn_save = QPushButton("保存报告")
+        btn_save.clicked.connect(lambda: self.saveRequested.emit(parsed_result))
+
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.close)
+
+        button_layout.addWidget(btn_copy)
+        button_layout.addWidget(btn_save)
+        button_layout.addWidget(btn_close)
+
+        layout.addLayout(button_layout)
+
+    def select_all_questions(self, select_all: bool):
+        """全选或全不选问题"""
+        if not hasattr(self, 'question_list_widget'):
+            return
+
+        for i in range(self.question_list_widget.count()):
+            item = self.question_list_widget.item(i)
+            item.setCheckState(Qt.Checked if select_all else Qt.Unchecked)
+
+    def selected_questions(self) -> List[str]:
+        """已勾选的问题文本（按列表顺序）"""
+        if not hasattr(self, 'question_list_widget'):
+            return []
+        return [self.question_list_widget.item(i).text()
+                for i in range(self.question_list_widget.count())
+                if self.question_list_widget.item(i).checkState() == Qt.Checked]

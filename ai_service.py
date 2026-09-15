@@ -460,3 +460,82 @@ class TranscriptFromTemplateWorker(QThread):
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
+
+
+# ============================================================================
+# 解析 AI 回复
+# ----------------------------------------------------------------------------
+# 原先挂在 MainWindow 上（2026-09 搬来）。它不碰 self，解析的又正是本模块
+# 约定的回复格式（【审查结果】/【缺失问题列表】），所以归这里。
+# ============================================================================
+
+def parse_ai_result(ai_text: str) -> dict:
+    """解析AI结果，提取审查结果和缺失问题
+
+    Args:
+        ai_text: AI返回的完整文本
+
+    Returns:
+        包含审查结果和缺失问题的字典
+    """
+    # None / 非字符串一律当空文本：以前 None 会让末尾那句 print 的 len(None)
+    # 抛 TypeError——而 {"结果": None} 这种输入是够得着的。
+    if ai_text is None:
+        ai_text = ""
+    elif not isinstance(ai_text, str):
+        ai_text = str(ai_text)
+
+    result = {
+        "审查结果": "",
+        "缺失问题": [],
+        "原始文本": ai_text
+    }
+
+    try:
+        # 分割审查结果和缺失问题
+        if "【审查结果】" in ai_text and "【缺失问题列表】" in ai_text:
+            # 提取审查结果部分
+            start = ai_text.find("【审查结果】")
+            end = ai_text.find("【缺失问题列表】")
+
+            if start != -1 and end != -1:
+                review_text = ai_text[start:end]
+                # 清理标记
+                review_text = review_text.replace("【审查结果】", "").strip()
+                result["审查结果"] = review_text
+
+                # 提取缺失问题部分
+                questions_text = ai_text[end:]
+                # 按行分割
+                lines = questions_text.split('\n')
+
+                for line in lines:
+                    line = line.strip()
+                    # 查找带方框的问题行
+                    if "□" in line and "问：" in line:
+                        # 提取问题文本（去掉方框和序号）
+                        # 示例：□ 1. 问：您与公司是否签订了书面劳动合同？
+                        question = line
+                        # 去掉方框标记
+                        question = question.replace("□", "", 1).strip()
+                        # 去掉序号（如"1. "）
+                        if "." in question:
+                            question = question.split(".", 1)[1].strip()
+
+                        result["缺失问题"].append(question)
+
+        # 如果格式不正确，尝试其他解析方式
+        elif "审查结果" in ai_text and "缺失问题" in ai_text:
+            # 尝试其他格式解析
+            pass
+
+        else:
+            # 如果没有找到格式标记，整个文本作为审查结果
+            result["审查结果"] = ai_text
+
+    except Exception as e:
+        print(f"解析AI结果失败: {e}")
+        result["审查结果"] = ai_text
+
+    print(f"✅ 解析结果: 审查结果长度={len(result['审查结果'])}, 问题数量={len(result['缺失问题'])}")
+    return result

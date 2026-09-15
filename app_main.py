@@ -22,13 +22,15 @@ from ui_main_build import MainWindowUI, ROLE_IDENTITY_HINT, ROLE_IDENTITY_LABEL
 # 控件类搬到了 material_list.py；这里保留一份再导出，外部 `from app_main import
 # MaterialListWidget` 的老写法仍然可用
 from material_list import MaterialListWidget  # noqa: F401
-from dialogs import ApprovalDecisionDialog, CaseDataReviewDialog
+from dialogs import (AIReviewResultDialog, ApprovalDecisionDialog,
+                      CaseDataReviewDialog)
 import case_store
 from services import (FileService, DataService, TemplateVariableManager,
                       CaseDataModel, PERSON_BASE_FIELDS, person_flat_key,
                       witness_seq_label, date_now, time_now, timestamp_now,
                       format_compact_time)
-from ai_service import AIService, AIWorker, TranscriptFromTemplateWorker
+from ai_service import (AIService, AIWorker, TranscriptFromTemplateWorker,
+                         parse_ai_result)
 from case_classifier import (
     CaseClassifier, REGULATION_OPTIONS,
     UNIT_TYPES, UNIT_TYPE_APPELLATION, DEFAULT_UNIT_TYPE, DEFAULT_IDENTITY,
@@ -1626,24 +1628,11 @@ class MainWindow(MainWindowUI):
 
         print("✅ 服务路径更新完成")
 
-    def select_all_questions(self, select_all: bool):
-        """全选或全不选问题"""
-        if not hasattr(self, 'question_list_widget'):
-            return
-
-        for i in range(self.question_list_widget.count()):
-            item = self.question_list_widget.item(i)
-            item.setCheckState(Qt.Checked if select_all else Qt.Unchecked)
-
     def insert_selected_questions(self, dialog):
-        """将选中的问题插入到笔录文档"""
+        """将选中的问题插入到笔录文档（问题清单归 dialog 自己管）"""
         try:
             # 获取选中的问题
-            selected_questions = []
-            for i in range(self.question_list_widget.count()):
-                item = self.question_list_widget.item(i)
-                if item.checkState() == Qt.Checked:
-                    selected_questions.append(item.text())
+            selected_questions = dialog.selected_questions()
 
             if not selected_questions:
                 QMessageBox.warning(dialog, "提示", "请至少选择一个要插入的问题")
@@ -1747,71 +1736,6 @@ class MainWindow(MainWindowUI):
             import traceback
             traceback.print_exc()
             return False, str(e)
-
-    def parse_ai_result(self, ai_text: str) -> dict:
-        """
-        解析AI结果，提取审查结果和缺失问题
-
-        Args:
-            ai_text: AI返回的完整文本
-
-        Returns:
-            包含审查结果和缺失问题的字典
-        """
-        result = {
-            "审查结果": "",
-            "缺失问题": [],
-            "原始文本": ai_text
-        }
-
-        try:
-            # 分割审查结果和缺失问题
-            if "【审查结果】" in ai_text and "【缺失问题列表】" in ai_text:
-                # 提取审查结果部分
-                start = ai_text.find("【审查结果】")
-                end = ai_text.find("【缺失问题列表】")
-
-                if start != -1 and end != -1:
-                    review_text = ai_text[start:end]
-                    # 清理标记
-                    review_text = review_text.replace("【审查结果】", "").strip()
-                    result["审查结果"] = review_text
-
-                    # 提取缺失问题部分
-                    questions_text = ai_text[end:]
-                    # 按行分割
-                    lines = questions_text.split('\n')
-
-                    for line in lines:
-                        line = line.strip()
-                        # 查找带方框的问题行
-                        if "□" in line and "问：" in line:
-                            # 提取问题文本（去掉方框和序号）
-                            # 示例：□ 1. 问：您与公司是否签订了书面劳动合同？
-                            question = line
-                            # 去掉方框标记
-                            question = question.replace("□", "", 1).strip()
-                            # 去掉序号（如"1. "）
-                            if "." in question:
-                                question = question.split(".", 1)[1].strip()
-
-                            result["缺失问题"].append(question)
-
-            # 如果格式不正确，尝试其他解析方式
-            elif "审查结果" in ai_text and "缺失问题" in ai_text:
-                # 尝试其他格式解析
-                pass
-
-            else:
-                # 如果没有找到格式标记，整个文本作为审查结果
-                result["审查结果"] = ai_text
-
-        except Exception as e:
-            print(f"解析AI结果失败: {e}")
-            result["审查结果"] = ai_text
-
-        print(f"✅ 解析结果: 审查结果长度={len(result['审查结果'])}, 问题数量={len(result['缺失问题'])}")
-        return result
 
     def on_pushButton_12_clicked(self):
         """谈话通知书按钮点击事件"""
@@ -2424,133 +2348,27 @@ class MainWindow(MainWindowUI):
             QMessageBox.critical(self, "AI审查错误", f"审查失败: {str(e)}")
 
     def show_ai_review_result(self, review_result):
-        """显示AI审查结果 - 带问题选择功能"""
-        print(f"🖥️ 显示审查结果，结果类型: {type(review_result)}")
-
-        # 处理不同的结果格式
+        """显示AI审查结果 —— 解析后交给 AIReviewResultDialog（带问题勾选）"""
         if isinstance(review_result, str):
             result_text = review_result
         elif isinstance(review_result, dict):
-            if "结果" in review_result:
-                result_text = review_result["结果"]
-            elif "错误信息" in review_result:
-                result_text = f"错误: {review_result['错误信息']}"
-            elif "原始回复" in review_result:
-                result_text = review_result["原始回复"]
+            for key in ("结果", "原始回复"):
+                if key in review_result:
+                    result_text = review_result[key]
+                    break
             else:
-                result_text = str(review_result)
+                result_text = (f"错误: {review_result['错误信息']}"
+                               if "错误信息" in review_result else str(review_result))
         else:
             result_text = str(review_result)
 
-        print(f"📝 要解析的文本长度: {len(result_text)}")
+        parsed_result = parse_ai_result(result_text)
 
-        # 解析AI结果
-        parsed_result = self.parse_ai_result(result_text)
-
-        # 创建对话框
-        dialog = QDialog(self)
-        dialog.setWindowTitle("AI法律审查结果")
-        dialog.resize(700, 600)
-
-        layout = QVBoxLayout()
-
-        # 标题
-        title = QLabel("AI法律审查报告")
-        title.setStyleSheet("font-size: 16px; font-weight: bold;")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
-
-        # 创建标签页
-        tab_widget = QTabWidget()
-
-        # 标签1：审查结果
-        review_tab = QWidget()
-        review_layout = QVBoxLayout()
-
-        review_label = QLabel("审查结果分析：")
-        review_label.setStyleSheet("font-weight: bold;")
-        review_layout.addWidget(review_label)
-
-        # 审查结果显示区域
-        review_text_edit = QTextEdit()
-        review_text_edit.setReadOnly(True)
-        review_text_edit.setPlainText(parsed_result["审查结果"])
-        review_text_edit.setMinimumHeight(300)
-        review_layout.addWidget(review_text_edit)
-
-        review_tab.setLayout(review_layout)
-        tab_widget.addTab(review_tab, "审查结果")
-
-        # 标签2：缺失问题（如果有）
-        if parsed_result["缺失问题"]:
-            questions_tab = QWidget()
-            questions_layout = QVBoxLayout()
-
-            questions_label = QLabel(f"发现 {len(parsed_result['缺失问题'])} 个缺失问题，请勾选需要添加到笔录的问题：")
-            questions_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
-            questions_layout.addWidget(questions_label)
-
-            # 创建问题列表（带复选框）
-            self.question_list_widget = QListWidget()
-
-            for question in parsed_result["缺失问题"]:
-                item = QListWidgetItem(question)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Unchecked)  # 默认未选中
-                self.question_list_widget.addItem(item)
-
-            questions_layout.addWidget(self.question_list_widget)
-
-            # 全选/全不选按钮
-            select_buttons_layout = QHBoxLayout()
-
-            btn_select_all = QPushButton("全选")
-            btn_select_all.clicked.connect(lambda: self.select_all_questions(True))
-
-            btn_select_none = QPushButton("全不选")
-            btn_select_none.clicked.connect(lambda: self.select_all_questions(False))
-
-            select_buttons_layout.addWidget(btn_select_all)
-            select_buttons_layout.addWidget(btn_select_none)
-            select_buttons_layout.addStretch()
-
-            questions_layout.addLayout(select_buttons_layout)
-
-            questions_tab.setLayout(questions_layout)
-            tab_widget.addTab(questions_tab, f"缺失问题 ({len(parsed_result['缺失问题'])})")
-
-        layout.addWidget(tab_widget)
-
-        # 按钮区域
-        button_layout = QHBoxLayout()
-
-        # 插入到笔录按钮（只在有问题时显示）
-        if parsed_result.get("缺失问题"):
-            btn_insert = QPushButton("插入选中问题到笔录")
-            btn_insert.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
-            btn_insert.clicked.connect(lambda: self.insert_selected_questions(dialog))
-            button_layout.addWidget(btn_insert)
-
-        btn_copy = QPushButton("复制结果")
-        btn_copy.clicked.connect(lambda: self.copy_to_clipboard(parsed_result["审查结果"]))
-
-        btn_save = QPushButton("保存报告")
-        btn_save.clicked.connect(lambda: self.save_ai_report(parsed_result))
-
-        btn_close = QPushButton("关闭")
-        btn_close.clicked.connect(dialog.close)
-
-        button_layout.addWidget(btn_copy)
-        button_layout.addWidget(btn_save)
-        button_layout.addWidget(btn_close)
-
-        layout.addLayout(button_layout)
-
-        dialog.setLayout(layout)
-
-        # 保存解析结果到对话框对象，以便后续使用
-        dialog.parsed_result = parsed_result
-
+        # 对话框只管显示与勾选，三个动作（插入 / 复制 / 保存）回抛到这里
+        dialog = AIReviewResultDialog(parsed_result, self)
+        dialog.insertRequested.connect(lambda: self.insert_selected_questions(dialog))
+        dialog.copyRequested.connect(self.copy_to_clipboard)
+        dialog.saveRequested.connect(self.save_ai_report)
         dialog.exec_()
 
     def copy_to_clipboard(self, text, parent=None):
