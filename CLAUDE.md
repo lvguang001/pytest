@@ -106,9 +106,12 @@ MainWindow   (app_main.py)        业务逻辑；信号统一在 _connect_signal
 - **删函数要查级联**：被删函数的唯一调用者会跟着变成死代码（本次就带出了
   `_update_case_in_data`、`get_company_info`、`create_enhanced_case_folder`、
   `get_missing`）。删完重跑一遍检测
-- **`patch_templates_2026.py` 是幂等的补丁脚本**，里面写死了各角色笔录的表头文本。
-  改了模板表头就必须同步改它，否则谁再跑一次补丁就把你的改动覆盖回去
-- **`*.bak.docx` 是补丁脚本生成的备份**，已 gitignore，不用管
+- **模板表头不要再靠脚本改**。曾经的 `patch_templates_2026.py` 是一次性补丁，
+  把各角色笔录表头改成「单位性质/身份」措辞——它写死了表头文本，谁改了模板、
+  再有人手滑跑一遍，改动就被覆盖回去。2026-09 确认 4 个谈话模板和 2 份告知书
+  都已是目标文本后把它删了（要捞回来看 `git log -- patch_templates_2026.py`）。
+  以后再要批量改模板，用一次性脚本改完就删，别长期留在仓库里
+- **`*.bak.docx` 是这类模板脚本生成的备份**，已 gitignore，不用管
 - **Windows 控制台 codepage 936**：在 `cmd` 里跑 pytest，中文测试名显示为乱码；
   Cursor/Windows Terminal（UTF-8）正常
 - **`MainWindow` 构造很重**（路径、服务、AI 客户端、组合框数据），

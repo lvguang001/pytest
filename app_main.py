@@ -3909,9 +3909,15 @@ class MainWindow(MainWindowUI):
             print(f"保存证人信息失败: {e}")
 
     def setup_logging(self):
-        """配置统一日志：轮转文件 + 控制台 + 全局异常兜底（幂等）。
+        """挂上统一日志与全局异常兜底，并暴露 self.log_warning / self.log_error。
 
         日志落在 数据目录/logs/ 下（程序目录不可写时自动退回临时目录）。
+
+        正常入口 `main.py` 在创建本窗口**之前**就配过一次（为了把窗口构建期间的
+        异常也记下来），所以走到这里时 `setup_logging` 已经是空操作——它内部有
+        `_configured` 守卫，只生效一次，**先调用者的路径参数生效、后来者被忽略**。
+        留着这一次是为了兼容 `python app_main.py` 直接启动（那时没人先配）；
+        `install_excepthook` / `install_qt_message_handler` 本身幂等，重复调用无副作用。
         """
         base = getattr(self, 'DATA_PATH', '') or str(path_utils.get_data_path(""))
         log_utils.setup_logging(os.path.join(base, "logs"))
@@ -3919,6 +3925,7 @@ class MainWindow(MainWindowUI):
         log_utils.install_qt_message_handler()
         self.log_warning = lambda msg: logger.warning("%s", msg)
         self.log_error = lambda msg: logger.error("%s", msg)
+
     def on_case_type_changed(self):
         """当案件类型选择改变时调用"""
         is_death_case = self.death_case_checkbox.isChecked()
