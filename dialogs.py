@@ -1,84 +1,25 @@
 # -*- coding: utf-8 -*-
 """主窗口之外的对话框。
 
-原先定义在 app_main.py 里（2026-09 搬出来）——它们只依赖 Qt 与 case_store，
-跟 MainWindow 没有关系，独立成文件后既好找也好单测外围逻辑。
+- `ApprovalDecisionDialog`：审批表 AI 分析结果（认定工伤 / 不予认定工伤 / 保存）
+- `AIReviewResultDialog`：AI 审查结果 + 缺失问题勾选
+
+原先都定义在 app_main.py 里（2026-09 搬出来）。只依赖 Qt，跟 MainWindow 无关，
+独立成文件后既好找也好单测外围逻辑。
+
+（**原「案件数据核对」对话框 2026-09 删除**：那是个可编辑的 JSON 窗，
+拦在「点谈话笔录」和生成之间。录入即保存之后它不再需要，见
+`MainWindow._save_case_from_form`。）
 """
 
-import json
-from typing import Any, Dict, List, Optional
+from typing import List
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont
+
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit,
     QWidget, QTabWidget, QMessageBox, QListWidget, QListWidgetItem,
 )
-
-from case_store import pack_case, unpack_case
-
-
-class CaseDataReviewDialog(QDialog):
-    """案件数据核对窗口。
-
-    以 JSON 文本形式展示完整案件数据，用户可直接编辑；
-    点击「保存并关闭」时解析 JSON（通过 get_case_obj() 读取），格式错误则提示且不关闭。
-    """
-
-    def __init__(self, case_obj: Dict[str, Any], parent=None):
-        super().__init__(parent)
-        self._case_obj: Optional[Dict[str, Any]] = None
-        self._build_ui(case_obj)
-
-    def _build_ui(self, case_obj):
-        self.setWindowTitle("🔍 案件数据核对")
-        self.resize(720, 800)
-        self.setMinimumSize(640, 660)
-
-        root = QVBoxLayout(self)
-
-        title = QLabel("请核对并修改案件数据（JSON 格式），改完后点「保存并关闭」")
-        title.setStyleSheet("font-size: 13px; font-weight: bold; padding: 4px;")
-        root.addWidget(title)
-
-        self.json_edit = QTextEdit()
-        self.json_edit.setFont(QFont("Consolas", 10))
-        # 展示与存盘一致的 v3 分块结构（case_info / injured_worker / witnesses / …）
-        self.json_edit.setPlainText(json.dumps(pack_case(case_obj), ensure_ascii=False, indent=2))
-        root.addWidget(self.json_edit, 1)
-
-        btns = QHBoxLayout()
-        btns.addStretch()
-
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        btns.addWidget(cancel_btn)
-
-        save_btn = QPushButton("保存并关闭")
-        save_btn.setStyleSheet(
-            "QPushButton { background-color: #27ae60; color: white; font-weight: bold; "
-            "padding: 6px 24px; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #219150; }"
-        )
-        save_btn.clicked.connect(self._on_save)
-        btns.addWidget(save_btn)
-
-        root.addLayout(btns)
-
-    def _on_save(self):
-        text = self.json_edit.toPlainText().strip()
-        try:
-            obj = json.loads(text)
-            if not isinstance(obj, dict):
-                raise ValueError("JSON 顶层必须是对象 {…}")
-            # 分块结构 → 内存 flat（用户把块删了则按原样透传，不阻断）
-            self._case_obj = unpack_case(obj)
-            self.accept()
-        except Exception as e:
-            QMessageBox.warning(self, "JSON 格式错误", f"无法解析 JSON：\n{str(e)}\n\n请修正后再保存。")
-
-    def get_case_obj(self) -> Optional[Dict[str, Any]]:
-        return self._case_obj
 
 
 class ApprovalDecisionDialog(QDialog):

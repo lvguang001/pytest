@@ -43,7 +43,7 @@ def test_talk_notice_button_fires_slot_once(fresh_window):
 def test_talk_transcript_button_fires_slot_once(fresh_window):
     """「谈话笔录」按钮同理。"""
     n = _click_once(fresh_window, fresh_window.pushButton,
-                    "open_data_review", lambda *a, **k: False)
+                    "_save_case_from_form", lambda *a, **k: False)
     assert n == 1, f"点一次「谈话笔录」跑了 {n} 次"
 
 

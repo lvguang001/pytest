@@ -22,8 +22,7 @@ from ui_main_build import MainWindowUI, ROLE_IDENTITY_HINT, ROLE_IDENTITY_LABEL
 # 控件类搬到了 material_list.py；这里保留一份再导出，外部 `from app_main import
 # MaterialListWidget` 的老写法仍然可用
 from material_list import MaterialListWidget  # noqa: F401
-from dialogs import (AIReviewResultDialog, ApprovalDecisionDialog,
-                      CaseDataReviewDialog)
+from dialogs import AIReviewResultDialog, ApprovalDecisionDialog
 import case_store
 import documents
 import transcripts
@@ -345,8 +344,8 @@ class MainWindow(MainWindowUI):
                 return
 
             # 本人：已生成过笔录就先问要不要覆盖。
-            # 放在数据核对之前——open_data_review 自己会把案件数据写回磁盘，先核对再问的话，
-            # 点「否」也白跑了一轮核对与保存。第一次点按钮时案本号可能还没生成，那时也不会有
+            # 放在保存之前——_save_case_from_form 会把案件数据写回磁盘，先存再问的话，
+            # 点「否」也白存了一遍。第一次点按钮时案本号可能还没生成，那时也不会有
             # 旧笔录（_main_transcript_files 拿不到目录就返回空），自然放行。
             if current_role == "本人":
                 case_id = self.current_case_id or self.lineEdit_2.text().strip()
@@ -354,15 +353,14 @@ class MainWindow(MainWindowUI):
                     self._set_status('已取消', 'black')
                     return
 
-            # ── 第一步：弹出数据核对窗口，逐项核对并允许修改 ──
-            if not self.open_data_review():
-                self._set_status('已取消', 'black')
+            # ── 第一步：把当前录入存下来（后面的生成是从磁盘读案件数据的）──
+            if not self._save_case_from_form():
                 return
 
             # ── 第二步：按角色生成（同一套代码路径，仅提示词/模板按角色区分）──
             role = self.get_current_role_type()
             if role == "证人":
-                # 数据核对会把表单回填成本人数据，这里把表单切回当前证人显示
+                # 上一步的回写会把表单填成本人数据，这里把表单切回当前证人显示
                 self._sync_current_witness_to_form()
                 # 证人：直接生成证人谈话笔录
                 self._generate_role_transcript('证人')
@@ -385,18 +383,21 @@ class MainWindow(MainWindowUI):
             traceback.print_exc()
 
     # ========================================================================
-    # 数据核对（第一步）相关方法
+    # 保存当前录入（点「谈话笔录」的第一步）
     # ========================================================================
 
-    def open_data_review(self) -> bool:
-        """弹出案件数据核对窗口（JSON 文本形式）。
+    def _save_case_from_form(self) -> bool:
+        """把主界面当前录入收成案件对象、回写、落盘。
 
-        点击时先自动生成案本号填入 case_id；用户可编辑 JSON；
-        保存时解析、落盘并回写主界面。
+        点「谈话笔录」时先走这一步，因为后面的生成流程是**从磁盘读案件数据**的
+        （见 `_generate_role_transcript`），不先存就找不到案件。
+
+        案本号在这一步自动生成。原先是「弹一个 JSON 核对窗让用户改完再存」，
+        2026-09 把核对窗删掉了——录入即保存，不再拦一道确认。
         """
         data, materials, _, _ = self._collect_review_data()
 
-        # ── 点击即自动生成案本号，填入 case_id ──
+        # ── 自动生成案本号 ──
         case_id = str(data.get('case_id', '')).strip()
         if not case_id:
             case_id = self._auto_generate_case_number(
@@ -406,37 +407,26 @@ class MainWindow(MainWindowUI):
         self.current_case_id = case_id
 
         case_obj = self._build_case_object(data, materials)
-
-        dlg = CaseDataReviewDialog(case_obj, self)
-        if dlg.exec_() != QDialog.Accepted:
-            self._set_status('已取消数据核对', 'black')
-            return False
-
-        case_obj = dlg.get_case_obj()
-        if not case_obj:
-            return False
-
-        # 以最终 JSON 里的 case_id 为准（用户可能在文本框里改过）
-        case_id = str(case_obj.get('case_id', '')).strip() or case_id
         case_obj['case_id'] = case_id
-        self.current_case_id = case_id
 
-        # ── 回写主界面与数据模型 ──
+        # ── 回写主界面与数据模型（把自动生成的案本号等派生值显示出来）──
         self._apply_case_object(case_obj)
 
-        # ── 保存到 cases_data.json ──
+        # ── 保存到磁盘（保留既有扩展字段）──
         cases = self._load_cases_data()
         old = cases.get(case_id)
         if old:
             # 整体覆盖前保留既有扩展字段（service_flow/folder_name/transcript_file/
-            # analysis_result/conclusion 等），避免重复核对保存时丢失
+            # analysis_result/conclusion 等），避免重复保存时丢失
             for k, v in old.items():
                 case_obj.setdefault(k, v)
         cases[case_id] = case_obj
-        self._save_cases_data(cases)
+        if not self._save_cases_data(cases):
+            # 存不下就别继续了——下一步是从磁盘读案件数据的，读到的会是旧值或空
+            self._set_status('案件数据保存失败，已中止', 'red')
+            return False
 
-        self._set_status(f'数据已核对并保存（案本号：{case_id}）', 'green')
-        print(f"✅ 数据核对完成并保存到 cases_data.json（案本号：{case_id}）")
+        self._set_status(f'案件数据已保存（案本号：{case_id}）', 'green')
         return True
 
     def _collect_review_data(self):

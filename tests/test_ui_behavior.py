@@ -112,3 +112,69 @@ def _f2_event():
     from PyQt5.QtCore import QEvent, Qt
     from PyQt5.QtGui import QKeyEvent
     return QKeyEvent(QEvent.KeyPress, Qt.Key_F2, Qt.NoModifier)
+
+
+# ============================================================================
+# 保存当前录入（原「数据核对窗」那一步）
+# ============================================================================
+
+def test_the_data_review_dialog_is_gone():
+    """「案件数据核对」窗 2026-09 删除。
+
+    那是个可编辑的 JSON 窗，拦在「点谈话笔录」和生成之间——你点一下按钮，
+    实际是「点 → 核对 → 生成」。现在录入即保存。
+
+    留个守卫：再把模态窗加回去，这条链就又变成三步了。
+    （不在这里调 on_talk_button_clicked——真弹窗会让测试挂住，而不是失败。）
+    """
+    import dialogs
+    assert not hasattr(dialogs, "CaseDataReviewDialog")
+
+
+def test_saving_the_form_persists_the_case(fresh_window):
+    """★ 这一步必须落盘：后面的生成流程是**从磁盘读**案件数据的。
+
+    见 _generate_role_transcript —— 它调 _load_cases_data().get(case_id)，
+    不先存就会报「未找到该案本号的案件数据」。
+    """
+    w = fresh_window
+    w.name_pane.setText("张三")
+    w.idnumer_pane.setText("330102199001011234")
+    w.lineEdit_5.setText("电焊工")
+    w.lineEdit_2.clear()
+    w.current_case_id = ""
+
+    assert w._save_case_from_form() is True
+
+    case_id = w.current_case_id
+    assert case_id, "案本号没自动生成"
+    assert w.lineEdit_2.text() == case_id, "案本号没回填到界面"
+
+    saved = w._load_cases_data().get(case_id)
+    assert saved is not None, "案件没落盘——下一步会读不到"
+    assert saved["name"] == "张三"
+    assert saved["position"] == "电焊工"
+    assert saved["case_id"] == case_id
+
+
+def test_saving_the_form_keeps_existing_extended_fields(fresh_window):
+    """重复保存时不能把 service_flow / conclusion 这些扩展字段冲掉。"""
+    w = fresh_window
+    w.name_pane.setText("李四")
+    w.lineEdit_2.clear()
+    w.current_case_id = ""
+    assert w._save_case_from_form() is True
+    case_id = w.current_case_id
+
+    # 模拟送达流程写入的扩展字段
+    cases = w._load_cases_data()
+    cases[case_id]["service_flow"] = {"phase": "ask"}
+    cases[case_id]["conclusion"] = "予以认定"
+    w._save_cases_data(cases)
+
+    # 再存一次（用户又点了一次谈话笔录）
+    assert w._save_case_from_form() is True
+    again = w._load_cases_data()[case_id]
+    assert again.get("service_flow") == {"phase": "ask"}, "service_flow 被冲掉了"
+    assert again.get("conclusion") == "予以认定", "conclusion 被冲掉了"
+    assert again["name"] == "李四"
