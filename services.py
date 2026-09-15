@@ -49,18 +49,32 @@ def person_flat_key(role: str, field: str) -> str:
 
 
 def witness_seq_label(n: int) -> str:
-    """把序号转成中文证人编号：1→证人一, 10→证人十, 11→证人十一, 21→证人二十一"""
+    """把序号转成中文证人编号：1→证人一, 10→证人十, 11→证人十一, 21→证人二十一。
+
+    n>=100 也认（一百、一百零一、一百一十、一百二十一）。一个案子当然不会有
+    100 个证人，但这里原先写成 `_CN_DIGITS[n // 10]`，十位取到 10 就 IndexError
+    ——纯属没兜住，顺手补上。再往上（>=1000）退回阿拉伯数字，不硬凑中文。
+    """
     if n <= 0:
         return f"证人{n}"
-
-    if n <= 10:
-        body = _CN_DIGITS[n] if n < 10 else "十"
-    elif n < 20:
+    if n < 10:
+        return f"证人{_CN_DIGITS[n]}"
+    if n < 20:
         body = "十" + (_CN_DIGITS[n % 10] if n % 10 else "")
-    else:
-        tens = n // 10
-        ones = n % 10
+    elif n < 100:
+        tens, ones = divmod(n, 10)
         body = _CN_DIGITS[tens] + "十" + (_CN_DIGITS[ones] if ones else "")
+    elif n < 1000:
+        hundreds, rest = divmod(n, 100)
+        body = _CN_DIGITS[hundreds] + "百"
+        if rest == 0:
+            return f"证人{body}"
+        if rest < 10:
+            return f"证人{body}零{_CN_DIGITS[rest]}"
+        tens, ones = divmod(rest, 10)
+        body += _CN_DIGITS[tens] + "十" + (_CN_DIGITS[ones] if ones else "")
+    else:
+        return f"证人{n}"
 
     return f"证人{body}"
 
