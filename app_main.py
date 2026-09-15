@@ -1472,17 +1472,6 @@ class MainWindow(MainWindowUI):
             out[dirname] = flat
         return out
 
-    @staticmethod
-    def _peek_version(path: str) -> str:
-        """只读文件开头取 version，避免为一行版本号解析整份案卷"""
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                head = f.read(256)
-            m = re.search(r'"version"\s*:\s*"([^"]*)"', head)
-            return m.group(1) if m else ''
-        except Exception:
-            return ''
-
     def _write_case_file(self, case_id: str, block: Dict[str, Any]) -> str:
         """原子写单个案件文件；写前把旧内容转存 .bak（每次刷新 = 「撤销上一次保存」）
 

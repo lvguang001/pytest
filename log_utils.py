@@ -21,7 +21,6 @@ _MAX_BYTES = 2 * 1024 * 1024   # 单个日志文件上限 2MB
 _BACKUP_COUNT = 5              # 轮转保留 5 个历史文件
 
 _configured = False
-log_dir = ""
 
 
 def _writable_dir(preferred):
@@ -49,7 +48,7 @@ def setup_logging(preferred_dir=None, level=logging.INFO,
     文件收 INFO 及以上（完整留痕）；控制台只收 WARNING 及以上，避免与程序里
     大量既有的 print 重复刷屏。
     """
-    global _configured, log_dir
+    global _configured
     root = logging.getLogger()
     if _configured:
         return root
@@ -66,7 +65,6 @@ def setup_logging(preferred_dir=None, level=logging.INFO,
             fh.setFormatter(fmt)
             fh.setLevel(level)
             root.addHandler(fh)
-            log_dir = d
         except Exception as e:
             print(f"⚠️ 无法创建日志文件: {e}")
 
@@ -137,8 +135,3 @@ def install_qt_message_handler():
         logger.log(levels.get(msg_type, logging.INFO), message)
 
     qInstallMessageHandler(_handler)
-
-
-def get_log_dir():
-    """返回当前日志目录（未配置或不可写时为空串）"""
-    return log_dir

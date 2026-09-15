@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QMessageBox, QDialog,
 )
 
-from service_flow import DOC_LABEL, METHODS, normalize_date, today_iso
+from service_flow import DOC_LABEL, METHODS, normalize_date
 
 # “带方框”的单选观感（圆点改方框）
 _RADIO_SQUARE_QSS = """

@@ -43,7 +43,6 @@ def _prompts_dir():
         from path_utils import path_utils
         base = path_utils.resource_dir
     except Exception:
-        import sys
         base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resource")
     prompts_dir = os.path.join(str(base), "prompts")
     os.makedirs(prompts_dir, exist_ok=True)

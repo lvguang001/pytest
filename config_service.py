@@ -13,7 +13,6 @@ import shutil
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 import traceback
-import platform
 from typing import Dict, Any, Optional, List
 
 # ============================================================================
