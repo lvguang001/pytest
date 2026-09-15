@@ -6,7 +6,7 @@
 
 ### 当前版本：3.0
 
-顶层 `version` 字段标明结构版本（`app_main.SCHEMA_VERSION`）。读到更高版本时程序会记
+顶层 `version` 字段标明结构版本（`case_store.SCHEMA_VERSION`）。读到更高版本时程序会记
 ERROR 日志并提示改用新版程序，但**仍会读出来**，不会因为版本号就让用户看不到案件。
 
 ```json

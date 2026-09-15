@@ -9,7 +9,7 @@
   多处改动用「；」分隔，大改动在正文分条列要点。参考 `git log` 已有风格
 - **注释用中文**，密度随现有代码
 - **直接提交到 `master`**（本仓库历史一直是线性直提，没有分支流程）
-- 改动前后都跑 `python -m pytest`（28 个用例，约 2 秒）
+- 改动前后都跑 `python -m pytest`（53 个用例，约 2 秒）
 
 ## 架构要点
 
@@ -17,7 +17,7 @@
 
 **这是全项目最容易改坏的地方。**
 
-磁盘上 `cases_data.json` 是「案本号下按人分块」：
+磁盘上单个案件文件是「案本号下按人分块」：
 
 ```
 case_id / case_info / injured_worker / witnesses[] / legal_reps[] / family_reps[]
@@ -33,8 +33,13 @@ _load_cases_data:  磁盘分块 --unpack_case()--> flat
 _save_cases_data:  flat --pack_case()-------> 磁盘分块
 ```
 
+**这块投影层整个在 `case_store.py` 里**（`pack_case` / `unpack_case` /
+`migrate_case` / `SCHEMA_VERSION`）。它不碰文件系统、不依赖 MainWindow，
+所以可以直接单测——`tests/test_case_store.py` 已覆盖。改这里先跑它。
+
 **所以改动时不要动下游的读取代码**，只在 `pack_case` / `unpack_case` 里调整。
-新增字段时想清楚它该进 `case_info` 还是 `injured_worker`（见 `_INJURED_WORKER_FIELDS`）。
+新增字段时想清楚它该进 `case_info` 还是 `injured_worker`
+（见 `case_store._INJURED_WORKER_FIELDS`）。
 
 同一条链路上还有 `migrate_case()`（老档家属槽位迁移）——它靠「`identity` 键**不存在**」
 而不是「值为空」来识别老档，因为新记录一律带该键。改这条判据会让新档数据被误搬。
@@ -119,7 +124,8 @@ MainWindow   (app_main.py)        业务逻辑；信号统一在 _connect_signal
 
 ## 写测试的约定
 
-- 界面结构/外观放 `tests/test_ui_layout.py`；点出来的行为放 `tests/test_ui_behavior.py`；
+- 纯函数（最快，无 Qt）放 `tests/test_case_store.py`——案件数据投影层就在这测；
+  界面结构/外观放 `tests/test_ui_layout.py`；点出来的行为放 `tests/test_ui_behavior.py`；
   信号连接放 `tests/test_ui_signals.py`；公共夹具与工具在 `conftest.py` / `ui_helpers.py`
 - **危险逻辑的测试要用变异验证**：把修复改回旧写法，确认对应用例真的会失败。
   写过一条「原子写入」用例只检查没留下 `.tmp`，改回截断写法照样通过——是假测试，

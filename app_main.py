@@ -23,6 +23,8 @@ from ui_main_build import MainWindowUI
 # 控件类搬到了 material_list.py；这里保留一份再导出，外部 `from app_main import
 # MaterialListWidget` 的老写法仍然可用
 from material_list import MaterialListWidget  # noqa: F401
+from case_store import (SCHEMA_VERSION, is_newer_version, migrate_case,
+                        pack_case, unpack_case)
 from services import FileService, DataService, TemplateVariableManager
 from ai_service import AIService
 from case_classifier import CaseClassifier
@@ -137,112 +139,15 @@ def person_flat_key(role: str, field: str) -> str:
     return f"{role}{PERSON_CN_SUFFIX.get(field, field)}"
 
 
-# ============================================================================
-# cases_data.json 磁盘结构（v3：案本号下按人分块）
-# ----------------------------------------------------------------------------
-#   { "version": "3.0", "cases": { "案本号": {
-#         "case_id":       "案本号",
-#         "case_info":     { …案件级 + 流程/扩展字段… },
-#         "injured_worker":{ …本人（受伤职工）… },
-#         "witnesses":     [ …N 位证人，每人一条人记录… ],
-#         "legal_reps":    [ …法人… ],
-#         "family_reps":   [ …家属（工亡）… ],
-#   }}}
-#
-# 内存里仍沿用"本人字段平铺在顶层"的 flat 形态（下游 80+ 处 case_obj.get('name')
-# 等读取、提示词填充、模板渲染都不用动），只在读写磁盘的两个函数里做投影：
-#   _load_cases_data: 磁盘分块 --unpack_case--> flat
-#   _save_cases_data: flat --pack_case--> 磁盘分块
-# ============================================================================
-
-# 归入 "injured_worker" 块的键（其余一律进 "case_info"）
-_INJURED_WORKER_FIELDS = ("name", "gender", "age", "id_card", "address", "phone",
-                          "position", "identity", "unit",
-                          "injury_description", "materials")
-# 本身就是独立"人块"的键，不重复进 case_info
-_NAMED_BLOCKS = ("witnesses", "legal_reps", "family_reps")
-# 已在块顶单独占位的键，同样不重复进 case_info
-_TOP_LEVEL_KEYS = ("case_id",)
-
-# 当前磁盘结构版本。读到更高版本时说明是更新版程序写的，不能静默按旧结构处理。
-SCHEMA_VERSION = "3.0"
-
-# 案件数据的磁盘布局：一案一文件，<BASE_PATH>/<案本号>/case.json（与生成的文书同处一个案卷文件夹）
+# 案件数据的磁盘布局：一案一文件，<BASE_PATH>/<案本号>/case.json
+# （与生成的文书同处一个案卷文件夹）。**分块结构本身见 case_store.py**——
+# pack_case / unpack_case / migrate_case 与 schema 版本都在那边，纯函数、可直接单测。
 _CASE_FILE_NAME = "case.json"
 _LEGACY_CASES_FILE = "cases_data.json"      # 旧版「一个全库文件」，仅迁移时读
 
 # 保存前的备份层
 _BACKUP_DIR = "backups"        # 每日快照目录（与案件目录同级）
 _SNAPSHOT_KEEP = 30            # 每日快照保留份数
-
-
-def version_tuple(text) -> Optional[Tuple[int, ...]]:
-    """'3.0' → (3, 0)。无法解析（缺失/乱填）返回 None。"""
-    try:
-        return tuple(int(p) for p in str(text).split('.'))
-    except Exception:
-        return None
-
-
-def is_newer_version(disk_version) -> bool:
-    """磁盘上的版本是否高于本程序支持的版本"""
-    a, b = version_tuple(disk_version), version_tuple(SCHEMA_VERSION)
-    return bool(a and b and a > b)
-
-
-def pack_case(flat: Dict[str, Any]) -> Dict[str, Any]:
-    """内存 flat 案件对象 → 磁盘分块结构（v3）"""
-    worker = {k: flat[k] for k in _INJURED_WORKER_FIELDS if k in flat}
-    _skip = _INJURED_WORKER_FIELDS + _NAMED_BLOCKS + _TOP_LEVEL_KEYS
-    info = {k: v for k, v in flat.items() if k not in _skip}
-    return {
-        "case_id": flat.get("case_id", ""),
-        "case_info": info,
-        "injured_worker": worker,
-        "witnesses": list(flat.get("witnesses") or []),
-        "legal_reps": list(flat.get("legal_reps") or []),
-        "family_reps": list(flat.get("family_reps") or []),
-    }
-
-
-def unpack_case(block: Dict[str, Any]) -> Dict[str, Any]:
-    """磁盘分块结构（v3）→ 内存 flat 案件对象。
-
-    遇 v2 平铺结构（无 injured_worker 块）原样返回，实现老档向后兼容。
-    """
-    if not isinstance(block, dict):
-        return {}
-    if "injured_worker" not in block:
-        return dict(block)
-    flat = dict(block.get("case_info") or {})
-    flat["case_id"] = block.get("case_id", "") or flat.get("case_id", "")
-    flat.update(block.get("injured_worker") or {})
-    for blk in _NAMED_BLOCKS:
-        flat[blk] = list(block.get(blk) or [])
-    return flat
-
-
-def migrate_case(flat: Dict[str, Any]) -> Dict[str, Any]:
-    """老档兼容（幂等）：家属记录里的 position 过去存的是「与死者关系」。
-
-    现在 position 改存该家属自己的岗位、关系移入 identity，这里把老值搬到新槽位。
-
-    判据是 identity 键**不存在**，而非"值为空"：新口径的人记录由
-    _person_from_flat 生成，PERSON_BASE_FIELDS 的键一律存在（可能是空串）。
-    若按"值为空"判断，会把新档里"填了岗位、还没填关系"的家属误判成老档，
-    把岗位当成关系搬进身份栏。
-    """
-    reps = flat.get("family_reps")
-    if not reps:
-        return flat
-    migrated = []
-    for fr in reps:
-        if isinstance(fr, dict) and "identity" not in fr and fr.get("position"):
-            fr = dict(fr)
-            fr["identity"] = fr.pop("position")
-        migrated.append(fr)
-    flat["family_reps"] = migrated
-    return flat
 
 
 # 角色 → 谈话笔录生成配置（提示词 key / 笔录 docx 模板 / 模板占位符数据方法）——单一事实源
