@@ -26,6 +26,7 @@ from dialogs import (AIReviewResultDialog, ApprovalDecisionDialog,
                       CaseDataReviewDialog)
 import case_store
 import documents
+import transcripts
 from services import (FileService, DataService, TemplateVariableManager,
                       CaseDataModel, PERSON_BASE_FIELDS, person_flat_key,
                       witness_seq_label, date_now, time_now, timestamp_now,
@@ -922,81 +923,12 @@ class MainWindow(MainWindowUI):
         QTimer.singleShot(0, self.approve)  # 等同点击“案件审批表”按钮
 
     def _build_unified_template_data(self, case_obj: Dict[str, Any]) -> Dict[str, Any]:
-        """构建统一的模板渲染字典。
-
-        中文 key 为主（模板占位符统一用中文），同时附带英文 case_obj 字段名 key，
-        模板里写中文或英文占位符都能被替换。
-        """
-        elements = case_obj.get('proposed_article_elements', []) or []
-        materials = case_obj.get('materials', []) or []
-        # {{已提供材料}} 只列**已勾选**的：未勾选的也列进去，AI 会以为证据已经齐了
-        material_names = [m.get('name', '') for m in materials
-                          if isinstance(m, dict) and m.get('name') and m.get('provided')]
-        injury_time = format_compact_time(case_obj.get('injury_time', ''))
-        visit_time = format_compact_time(case_obj.get('visit_time', ''))
-
-        # 统一中文占位符
-        zh = {
-            '案本号': case_obj.get('case_id', ''),
-            '案件性质': case_obj.get('case_nature', ''),
-            '申请类型': case_obj.get('applicant_type', ''),
-            '用工单位': case_obj.get('employer', ''),
-            '用人单位': case_obj.get('labor_unit', ''),
-            '工地名称': case_obj.get('site', ''),
-            '申请时间': case_obj.get('apply_time', ''),
-            '受理时间': case_obj.get('accept_time', ''),
-            '受伤时间': injury_time,
-            '就诊时间': visit_time,
-            '拟用条例': case_obj.get('proposed_article', ''),
-            '法律要件': ' + '.join(elements) if elements else '',
-            '本人姓名': case_obj.get('name', ''),
-            '本人性别': case_obj.get('gender', ''),
-            '本人年龄': case_obj.get('age', ''),
-            '本人身份证号': case_obj.get('id_card', ''),
-            '本人手机号': case_obj.get('phone', ''),
-            '本人身份证地址': case_obj.get('address', ''),
-            '本人岗位': case_obj.get('position', ''),
-            '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-            '单位名称': case_obj.get('labor_unit', ''),
-            '本人身份': case_obj.get('identity', DEFAULT_IDENTITY),
-            '受伤经过': case_obj.get('injury_description', ''),
-            '已提供材料': '、'.join(material_names) if material_names else '',
-            '记录人': case_obj.get('recorder', '') or self._get_current_username(),
-            '申请人名称': case_obj.get('applicant_name', ''),
-            '用户名': self._get_current_username(),
-            '当前时期': self.get_data('当前时期', '') or (date_now() + time_now()),
-        }
-
-        # 英文 key（case_obj 字段名，兼容写法）
-        en = {
-            'case_id': case_obj.get('case_id', ''),
-            'case_nature': case_obj.get('case_nature', ''),
-            'applicant_type': case_obj.get('applicant_type', ''),
-            'employer': case_obj.get('employer', ''),
-            'labor_unit': case_obj.get('labor_unit', ''),
-            'site': case_obj.get('site', ''),
-            'apply_time': case_obj.get('apply_time', ''),
-            'accept_time': case_obj.get('accept_time', ''),
-            'injury_time': injury_time,
-            'visit_time': visit_time,
-            'proposed_article': case_obj.get('proposed_article', ''),
-            'proposed_article_elements': ' + '.join(elements) if elements else '',
-            'name': case_obj.get('name', ''),
-            'gender': case_obj.get('gender', ''),
-            'age': case_obj.get('age', ''),
-            'id_card': case_obj.get('id_card', ''),
-            'phone': case_obj.get('phone', ''),
-            'address': case_obj.get('address', ''),
-            'position': case_obj.get('position', ''),
-            'injury_description': case_obj.get('injury_description', ''),
-            'materials': '、'.join(material_names) if material_names else '',
-            'recorder': case_obj.get('recorder', '') or self._get_current_username(),
-            'applicant_name': case_obj.get('applicant_name', ''),
-        }
-
-        merged = dict(zh)
-        merged.update(en)
-        return merged
+        """统一模板渲染字典（实现在 transcripts.py；这里补上环境：用户名、当前时期）"""
+        return transcripts.build_unified_template_data(
+            case_obj,
+            username=self._get_current_username(),
+            current_period=self.get_data('当前时期', ''),
+        )
 
     def _build_case_object(self, data, materials) -> Dict[str, Any]:
         """构建单个案件对象（case_id 为第一字段）
@@ -1051,100 +983,24 @@ class MainWindow(MainWindowUI):
         self.transcript_worker.error.connect(self._on_transcript_error)
         self.transcript_worker.start()
 
-    def _identity_wording_hint(self, unit_type: str, identity: str, role: str) -> str:
-        """按单位性质/身份给 AI 一句措辞提示（只返回句子，行首「- 称谓提示：」标签在模板里）。
-
-        企业案返回空串——沿用「职工/公司」口径，无需提示；此时提示词里那一行会整行消失
-        （见 render_prompt_template：被替换成空串的占位符若独占一行则整行删掉）。
-        机关/事业单位若不提示，AI 容易写出「公司职工、考勤打卡、车间班组」等企业话术。
-        """
-        ut = (unit_type or "").strip() or DEFAULT_UNIT_TYPE
-        if ut == "企业":
-            return ""
-        ident = (identity or "").strip() or DEFAULT_IDENTITY
-        appellation = UNIT_TYPE_APPELLATION.get(ut) or f"{ut}工作人员"
-        return (f"本案单位性质为【{ut}】。{role}的身份是【{ident}】。"
-                f"请把受伤职工/被询问人的称谓写成“{appellation}”，"
-                f"避免“公司职工、在公司上班、考勤打卡、车间班组”等企业话术。")
-
     def _prompt_fill_data(self, role: str, case_obj: dict) -> Dict[str, Any]:
-        """返回用于填充该角色「发给AI」提示词的数据（case_obj + 当前人记录/法人flat 兼容键）"""
+        """「发给AI」提示词的填充数据（实现在 transcripts.py）
+
+        证人要先确保存在一条当前证人记录——那一步有副作用，所以留在这一层。
+        """
+        witness = None
         if role == '证人':
             self._ensure_current_witness()
-            # 不调用 _sync_form_to_current_witness（open_data_review 已把表单回填成本人数据，会污染证人）
-            w = self._current_witness() or {}
-            return {
-                '案本号': case_obj.get('case_id', ''),
-                '案件性质': case_obj.get('case_nature', ''),
-                '申请类型': case_obj.get('applicant_type', ''),
-                '本人姓名': case_obj.get('name', ''),
-                '本人性别': case_obj.get('gender', ''),
-                '本人身份证号': case_obj.get('id_card', ''),
-                '用人单位': case_obj.get('labor_unit', ''),
-                '用工单位': case_obj.get('employer', ''),
-                '工地名称': case_obj.get('site', ''),
-                '受伤经过': case_obj.get('injury_description', ''),
-                '证人姓名': w.get('name', '') or self.get_data('证人姓名', ''),
-                '证人身份证号': w.get('id_card', '') or self.get_data('证人身份证号', ''),
-                '证人岗位': w.get('position', '') or self.get_data('证人岗位', ''),
-                '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-                '证人身份': w.get('identity') or self.get_data('证人身份', '') or DEFAULT_IDENTITY,
-                '身份话术': self._identity_wording_hint(
-                    case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-                    w.get('identity') or self.get_data('证人身份', '') or DEFAULT_IDENTITY, '证人'),
-            }
-        if role == '法人':
-            return {
-                '案本号': case_obj.get('case_id', ''),
-                '案件性质': case_obj.get('case_nature', ''),
-                '申请类型': case_obj.get('applicant_type', ''),
-                '本人姓名': case_obj.get('name', ''),
-                '本人性别': case_obj.get('gender', ''),
-                '本人身份证号': case_obj.get('id_card', ''),
-                '用人单位': case_obj.get('labor_unit', ''),
-                '用工单位': case_obj.get('employer', ''),
-                '工地名称': case_obj.get('site', ''),
-                '受伤经过': case_obj.get('injury_description', ''),
-                '法人姓名': self.get_data('法人姓名', ''),
-                '法人职务': self.get_data('法人职务', ''),
-                '法人身份证号': self.get_data('法人身份证号', ''),
-                '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-                '法人身份': self.get_data('法人身份', '') or DEFAULT_IDENTITY,
-                '身份话术': self._identity_wording_hint(
-                    case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-                    self.get_data('法人身份', '') or DEFAULT_IDENTITY, '法人'),
-            }
-        if role == '家属':
-            return {
-                '案本号': case_obj.get('case_id', ''),
-                '案件性质': case_obj.get('case_nature', ''),
-                '申请类型': case_obj.get('applicant_type', ''),
-                '本人姓名': case_obj.get('name', ''),      # 死者姓名（受伤职工）
-                '本人性别': case_obj.get('gender', ''),
-                '本人身份证号': case_obj.get('id_card', ''),
-                '用人单位': case_obj.get('labor_unit', ''),
-                '用工单位': case_obj.get('employer', ''),
-                '工地名称': case_obj.get('site', ''),
-                '受伤经过': case_obj.get('injury_description', ''),
-                '家属姓名': self.get_data('家属姓名', ''),
-                '家属身份证号': self.get_data('家属身份证号', ''),
-                '与死者关系': self.get_data('家属身份', ''),
-                '家属单位名称': self.get_data('家属单位名称', ''),
-                # 家属没单位 → 岗位一并留空（与笔录表头同一口径）
-                '家属岗位': (self.get_data('家属岗位', '')
-                             if self.get_data('家属单位名称', '') else ''),
-                '单位性质': case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-                '家属身份': self.get_data('家属身份', ''),
-                '身份话术': self._identity_wording_hint(
-                    case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-                    self.get_data('家属身份', ''), '家属'),
-            }
-        # 本人：复用统一模板数据（中文+英文 key 富余项替换无害），并附身份话术
-        base = self._build_unified_template_data(case_obj)
-        base['身份话术'] = self._identity_wording_hint(
-            case_obj.get('unit_type', DEFAULT_UNIT_TYPE),
-            case_obj.get('identity', DEFAULT_IDENTITY), '本人')
-        return base
+            # 不调用 _sync_form_to_current_witness（open_data_review 已把表单回填成
+            # 本人数据，会污染证人）
+            witness = self._current_witness() or {}
+        return transcripts.prompt_fill_data(
+            role, case_obj,
+            get_data=self.get_data,
+            witness=witness,
+            username=self._get_current_username(),
+            current_period=self.get_data('当前时期', ''),
+        )
 
     def _build_prompt_for_role(self, role: str, case_obj: dict) -> str:
         """按角色返回发给 AI 的 txt 提示词（ROLE_TALK 定 key，统一渲染并校验残留占位符）
@@ -1283,93 +1139,34 @@ class MainWindow(MainWindowUI):
         return self._delete_main_transcripts(old)
 
     def _save_transcript_to_template(self, case_obj: dict, content: str, role: str = '本人') -> str:
-        """渲染「{role}谈话笔录（普通工伤案件）.docx」模板，把 AI 问答插入到告知程序之后，返回文件路径（失败返回空串）。
-        本人/证人/法人共用同一条逻辑，仅按角色选择模板与占位符数据。"""
+        """渲染并保存该角色的谈话笔录（实现在 transcripts.py）
+
+        这一层负责「选模板、定案卷目录、失败时报状态栏」；渲染本身是纯的。
+        """
         try:
-            from docx.shared import Pt
             meta = ROLE_TALK.get(role, ROLE_TALK['本人'])
             label = f'{role}谈话笔录'
-
-            # ── 1. 渲染谈话模板（替换占位符）──
             template_path = str(path_utils.get_talk_template_path(meta['talk_template']))
-            if not os.path.exists(template_path):
-                logger.warning(f"⚠️ 谈话模板不存在: {template_path}")
-                return ""
-
             template_data = getattr(self, meta['docx_data'])(case_obj)
 
-            # ── 1.1 用 docxtpl 渲染占位符（保留占位符原有格式）──
-            from docxtpl import DocxTemplate
-            doc = DocxTemplate(template_path)
-            doc.render(template_data)
-
-            # ── 2. 定位「答：听清楚了，不申请回避。」锚点 ──
-            anchor_index = None
-            anchor_pf = None
-            for i, p in enumerate(doc.paragraphs):
-                if '答：听清楚了，不申请回避' in p.text:
-                    anchor_index = i
-                    anchor_pf = p.paragraph_format
-                    break
-
-            if anchor_index is None:
-                logger.warning("⚠️ 未找到锚点「答：听清楚了，不申请回避」")
-                return ""
-
-            # ── 3. 删除锚点之后的模板样例问答（保留头部+告知，避免与AI问答重复）──
-            body = doc.element.body
-            anchor_elem = doc.paragraphs[anchor_index]._element
-            after_anchor = False
-            for child in list(body):
-                if after_anchor:
-                    body.remove(child)
-                elif child is anchor_elem:
-                    after_anchor = True
-
-            # ── 4. 在锚点之后插入 AI 问答（每行下划线）──
-            for line in content.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                p = doc.add_paragraph()
-                if anchor_pf is not None:
-                    p.paragraph_format.alignment = anchor_pf.alignment
-                    p.paragraph_format.first_line_indent = anchor_pf.first_line_indent
-                    p.paragraph_format.space_before = anchor_pf.space_before
-                    p.paragraph_format.space_after = anchor_pf.space_after
-                run = p.add_run(line)
-                run.font.size = Pt(15)
-                run.underline = True
-
-            # ── 5. 保存 ──
+            # 案卷目录：年份目录 + 已存在的按原位
+            # （走 _case_dir，文书和数据必须落在同一个案卷文件夹里）
             if not self.current_case_folder or not os.path.exists(self.current_case_folder):
                 folder_subject = str(case_obj.get('case_id', '') or case_obj.get('name', '') or '案件').strip()
-                # 走 _case_dir：年份目录 + 已存在的按原位（文书和数据必须落在同一个案卷文件夹里）
                 self.current_case_folder = self._case_dir(folder_subject)
-                os.makedirs(self.current_case_folder, exist_ok=True)
 
             subject = str(case_obj.get('name', '') or case_obj.get('case_id', '') or '案件').strip()
-            file_name = f"{subject}{label}.docx"
-            target_path = os.path.join(self.current_case_folder, file_name)
-            counter = 2
-            while os.path.exists(target_path):
-                file_name = f"{subject}{label}({counter}).docx"
-                target_path = os.path.join(self.current_case_folder, file_name)
-                counter += 1
-
-            doc.save(target_path)
-            print(f"✅ {label}已生成: {target_path}")
-            return target_path
+            return transcripts.render_transcript(
+                template_path, template_data, content,
+                out_dir=self.current_case_folder,
+                file_base=f"{subject}{label}", label=label,
+            )
         except Exception as e:
             logger.error(f"❌ 生成{role}谈话笔录失败: {e}")
             import traceback
             traceback.print_exc()
             self._set_status(f'生成{role}谈话笔录失败', 'red')
             return ""
-
-    # ========================================================================
-    # 证人谈话笔录：提示词 / 模板占位符数据（生成统一走 _generate_role_transcript）
-    # ========================================================================
 
     def _build_witness_template_data(self, case_obj: dict) -> dict:
         """构建证人谈话笔录模板的占位符数据"""
