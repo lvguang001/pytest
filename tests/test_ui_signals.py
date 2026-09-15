@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """信号连接回归测试。
 
-背景（详见 refactor/CONTROLS.md §4.2）：`ui_main_window.py` 的 `setupUi()`
+背景：`ui_main_window.py` 的 `setupUi()`
 除了显式 `connect`，末尾还有一句 `QMetaObject.connectSlotsByName(Form)`，
 它会把**任何** `on_<子控件名>_<信号>` 形状的方法自动接上——而且
 `clicked()` / `clicked(bool)` 两个重载各接一条。

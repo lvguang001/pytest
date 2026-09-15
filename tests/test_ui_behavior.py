@@ -19,7 +19,11 @@ def test_role_switch_updates_identity_label(fresh_window):
 
 
 def test_case_unit_does_not_leak_into_other_roles(fresh_window):
-    """`company_pane` 四个角色共用，切角色必须按角色回填 —— 见 CONTROLS.md 的坑点说明。"""
+    """`company_pane` 四个角色共用，切角色必须按角色回填。
+
+    无条件把它的值写成案件级用人单位，会把证人/家属自己的单位污染成整案的单位，
+    全案文书都跟着错 —— 回填逻辑见 `MainWindow._restore_role_unit()`。
+    """
     w = fresh_window
     w.company_pane.setCurrentText("测试用人单位")
     assert w.get_data('用人单位') == "测试用人单位"

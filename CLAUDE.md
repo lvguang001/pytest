@@ -81,7 +81,8 @@ MainWindow   (app_main.py)        业务逻辑；信号统一在 _connect_signal
 ```
 
 - **控件变量名是业务契约**：`app_main.py` 有 80+ 处 `self.xxx`，一个都不能改。
-  完整清单在 `refactor/CONTROLS.md`（改界面前必读）。
+  改名前先跑 `python -m pytest`——`tests/ui_helpers.py` 的 `LEFT_ROWS`
+  和 `tests/ui_geometry_baseline.json` 就是控件清单，改错了会红。
 - 控件尺寸钉在 `MainWindowUI._SIZES` —— 布局不改就按 `sizeHint` 收缩，各行高度全变。
 - 信号连接**只在** `MainWindow._connect_signals()`（`.ui` 生成代码里那批除外）。
   新增信号请加在那里，别再散回各个初始化方法里——散着的时候没人看得出

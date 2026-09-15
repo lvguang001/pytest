@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """主界面布局回归测试（布局管理器版）。
 
-界面已从「绝对坐标 + 十几个 _move_xxx 补丁」改成布局管理器，背景见
-`refactor/CONTROLS.md`。这里锁两样东西：
+界面已从「绝对坐标 + 十几个 _move_xxx 补丁」改成布局管理器
+（构建在 `ui_main_build.MainWindowUI`）。这里锁两样东西：
 
 1. **结构** —— 17 行的顺序、18px 行距、右栏与左栏底边齐平、控件不重叠、
    没有控件漏在布局外面。结构是布局摆出来的，改坏了就该报错。
@@ -59,7 +59,7 @@ def test_left_column_starts_below_top_bar(window):
 
 
 def test_left_column_rows_are_in_the_documented_order(window):
-    """17 行的上下顺序必须与 CONTROLS.md §五 一致。"""
+    """17 行的上下顺序必须与 ui_helpers.LEFT_ROWS 一致。"""
     names = [name for name, _, _ in all_rows(window)]
     assert names == [row[0] for row in _documented_rows()]
 
@@ -123,7 +123,7 @@ def test_no_orphan_widgets(window):
 
 
 def test_left_column_holds_exactly_the_documented_widgets(window):
-    """左栏直接子控件应与 CONTROLS.md 的行表对得上，不多不少。"""
+    """左栏直接子控件应与 ui_helpers.LEFT_ROWS 的行表对得上，不多不少。"""
     from PyQt5.QtWidgets import QWidget
     documented = {m for _, members in _documented_rows() for m in members}
     actual = {c.objectName() for c in left_column(window).children()
