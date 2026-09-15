@@ -7,11 +7,17 @@
 纯函数、不碰 Qt，所以这个文件跑起来最快。
 """
 
+import json
+import os
+
 import pytest
 
 from case_store import (
     SCHEMA_VERSION, is_newer_version, migrate_case, pack_case, unpack_case,
     version_tuple,
+    case_dir, case_file, daily_snapshot, drop_case_files_not_in, iter_case_files,
+    load_all, locate_case_dir, migrate_legacy_file, safe_case_dirname, save_all,
+    update_case_field, write_case, year_for_case,
 )
 
 
@@ -175,3 +181,226 @@ def test_is_newer_version_compares_against_this_program():
     # 读不出来时不能谎报"更新"——否则会对正常文件刷一堆 ERROR
     assert is_newer_version(None) is False
     assert is_newer_version("乱填") is False
+
+
+# ============================================================================
+# 磁盘布局与读写（原先是 MainWindow 的方法，2026-09 搬到 case_store 并参数化）
+# ============================================================================
+
+# —— 目录名与年份 ——
+
+@pytest.mark.parametrize("raw,expected", [
+    ("2026-001", "2026-001"),
+    ('a/b\c:d*e?f"g<h>i|j', "a_b_c_d_e_f_g_h_i_j"),
+    ("  ..名字..  ", "名字"),
+    ("", "未命名案件"),
+    (None, "未命名案件"),
+])
+def test_safe_case_dirname(raw, expected):
+    assert safe_case_dirname(raw) == expected
+
+
+@pytest.mark.parametrize("case_id,expected", [
+    ("案本202609071111", "2026"),
+    ("工亡202512310001", "2025"),
+    ("20260907", "2026"),
+])
+def test_year_for_case_reads_it_from_the_case_id(case_id, expected):
+    assert year_for_case(case_id) == expected
+
+
+def test_year_for_case_falls_back_to_this_year():
+    import datetime
+    assert year_for_case("没有日期的案本号") == str(datetime.datetime.now().year)
+
+
+# —— 布局 ——
+
+def test_new_case_lands_under_a_year_folder(tmp_path):
+    base = str(tmp_path)
+    assert case_dir(base, "案本202609071111") == os.path.join(
+        base, "2026", "案本202609071111")
+    assert case_file(base, "案本202609071111") == os.path.join(
+        base, "2026", "案本202609071111", "case.json")
+
+
+def test_existing_case_stays_where_it_is(tmp_path):
+    """老布局（分年份之前存的 <BASE>/<案本号>/）命中后要留在原地。
+
+    搬它会把同处一处的文书和数据分开，用户还会以为文件丢了。
+    """
+    base = str(tmp_path)
+    old = os.path.join(base, "案本202500011111")
+    os.makedirs(old)
+    assert locate_case_dir(base, "案本202500011111") == old
+    assert case_dir(base, "案本202500011111") == old
+
+
+def test_iter_case_files_finds_both_layouts(tmp_path):
+    base = str(tmp_path)
+    os.makedirs(os.path.join(base, "2026", "新案"))
+    open(os.path.join(base, "2026", "新案", "case.json"), "w").close()
+    os.makedirs(os.path.join(base, "老案"))
+    open(os.path.join(base, "老案", "case.json"), "w").close()
+    os.makedirs(os.path.join(base, "2026", "空目录"))      # 没有 case.json
+    found = dict(iter_case_files(base))
+    assert set(found) == {"新案", "老案"}
+
+
+def test_iter_case_files_on_missing_dir_is_empty(tmp_path):
+    assert list(iter_case_files(str(tmp_path / "不存在"))) == []
+
+
+# —— 存 / 读 ——
+
+def test_save_then_load_round_trips(tmp_path):
+    base = str(tmp_path)
+    case = {"case_id": "案本202609070001", "name": "张三", "案件性质": "工伤案件",
+            "witnesses": [{"name": "李四"}], "legal_reps": [], "family_reps": []}
+    assert save_all(base, {"案本202609070001": case}) is True
+    assert load_all(base) == {"案本202609070001": case}
+
+
+def test_saved_file_carries_the_schema_version(tmp_path):
+    base = str(tmp_path)
+    save_all(base, {"c1": {"case_id": "c1", "name": "张三"}})
+    disk = json.loads(open(case_file(base, "c1"), encoding="utf-8").read())
+    assert disk["version"] == SCHEMA_VERSION
+    assert disk["injured_worker"]["name"] == "张三"
+
+
+def test_write_case_is_atomic_and_leaves_no_tmp(tmp_path):
+    base = str(tmp_path)
+    write_case(base, "c1", {"case_id": "c1"})
+    d = os.path.dirname(case_file(base, "c1"))
+    assert not [f for f in os.listdir(d) if f.endswith(".tmp")]
+
+
+def test_write_case_failure_leaves_the_original_intact(tmp_path, monkeypatch):
+    """★ 写到一半失败，原文件必须还在——这才是「原子写」的全部意义。
+
+    直接以 'w' 打开会立刻截断：写失败时这个案件就没了。
+    （只断言「没留下 .tmp」是不够的——改回截断写法照样通过，是假测试。）
+    """
+    import case_store as cs
+
+    base = str(tmp_path)
+    write_case(base, "c1", {"case_id": "c1", "case_info": {"名字": "原内容"}})
+    original = open(case_file(base, "c1"), encoding="utf-8").read()
+
+    def boom(*a, **k):
+        raise OSError("磁盘写满")
+
+    monkeypatch.setattr(cs.json, "dump", boom)
+    with pytest.raises(OSError):
+        write_case(base, "c1", {"case_id": "c1", "case_info": {"名字": "新内容"}})
+    assert open(case_file(base, "c1"), encoding="utf-8").read() == original,         "写失败把原文件毁了"
+
+
+def test_write_case_backs_up_the_previous_content(tmp_path):
+    """第二次写之前把旧内容存成 .bak —— 相当于「撤销上一次保存」。"""
+    base = str(tmp_path)
+    write_case(base, "c1", {"case_id": "c1", "case_info": {"名字": "旧"}})
+    write_case(base, "c1", {"case_id": "c1", "case_info": {"名字": "新"}})
+    bak = json.loads(open(case_file(base, "c1") + ".bak", encoding="utf-8").read())
+    assert bak["case_info"]["名字"] == "旧"
+
+
+def test_load_all_skips_a_broken_file_without_losing_the_others(tmp_path):
+    """从「一个全库文件」改成一案一文件，买的就是这个。"""
+    base = str(tmp_path)
+    save_all(base, {"good": {"case_id": "good", "name": "张三"}})
+    bad_dir = os.path.join(base, "2026", "bad")
+    os.makedirs(bad_dir)
+    open(os.path.join(bad_dir, "case.json"), "w", encoding="utf-8").write("{ 不是 json")
+    loaded = load_all(base)
+    assert set(loaded) == {"good"}          # 坏的那个被跳过，好的照常读出来
+
+
+def test_update_case_field_writes_back(tmp_path):
+    base = str(tmp_path)
+    save_all(base, {"c1": {"case_id": "c1", "name": "张三"}})
+    assert update_case_field(base, "c1", name="李四") is True
+    assert load_all(base)["c1"]["name"] == "李四"
+    assert update_case_field(base, "不存在", name="x") is False
+
+
+# —— 删除「这次没保存」的案件数据 ——
+
+def test_drop_removes_data_files_not_kept(tmp_path):
+    base = str(tmp_path)
+    save_all(base, {"keep": {"case_id": "keep"}, "drop": {"case_id": "drop"}})
+    drop_case_files_not_in(base, ["keep"])
+    assert set(load_all(base)) == {"keep"}
+
+
+def test_drop_never_touches_the_documents(tmp_path):
+    """★ 只删 case.json，**不动案卷里的文书**——文书是办案成果。"""
+    base = str(tmp_path)
+    save_all(base, {"drop": {"case_id": "drop"}})
+    d = os.path.dirname(case_file(base, "drop"))
+    doc = os.path.join(d, "张三谈话笔录.docx")
+    open(doc, "w", encoding="utf-8").write("文书内容")
+    drop_case_files_not_in(base, [])
+    assert not os.path.exists(case_file(base, "drop"))
+    assert os.path.exists(doc), "文书被连坐删掉了"
+
+
+# —— 快照 ——
+
+def test_daily_snapshot_is_written_once_a_day(tmp_path):
+    base = str(tmp_path)
+    packed = {"c1": {"case_id": "c1"}}
+    daily_snapshot(base, packed)
+    snap = os.listdir(os.path.join(base, "backups"))
+    assert len(snap) == 1 and snap[0].startswith("cases_data_")
+    first = open(os.path.join(base, "backups", snap[0]), encoding="utf-8").read()
+    daily_snapshot(base, {"c1": {"case_id": "改过了"}})      # 当天第二次
+    assert open(os.path.join(base, "backups", snap[0]), encoding="utf-8").read() == first
+
+
+# —— 老档迁移：一个全库文件 → 一案一文件 ——
+
+def _legacy_file(base, cases, version="2.0"):
+    path = os.path.join(base, "cases_data.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"version": version, "cases": cases}, f, ensure_ascii=False)
+    return path
+
+
+def test_migrate_splits_the_legacy_file_and_keeps_it_as_migrated(tmp_path):
+    base = str(tmp_path)
+    legacy = _legacy_file(base, {
+        "c1": {"case_id": "c1", "name": "张三"},
+    })
+    migrate_legacy_file(base)
+    assert not os.path.exists(legacy), "原文件该改名而不是留在原地"
+    assert os.path.exists(legacy + ".migrated")
+    assert os.path.exists(legacy + ".v2.bak"), "版本非当前时该留一份旧版程序能读的备份"
+    assert load_all(base)["c1"]["name"] == "张三"
+
+
+def test_migrate_is_idempotent(tmp_path):
+    base = str(tmp_path)
+    _legacy_file(base, {"c1": {"case_id": "c1", "name": "张三"}})
+    migrate_legacy_file(base)
+    before = load_all(base)
+    migrate_legacy_file(base)          # 再跑一遍：原文件已改名，直接返回
+    assert load_all(base) == before
+
+
+def test_migrate_does_not_overwrite_existing_case_files(tmp_path):
+    """中途失败下次启动接着补，不能把已经写好的新数据盖掉。"""
+    base = str(tmp_path)
+    save_all(base, {"c1": {"case_id": "c1", "name": "新数据"}})
+    _legacy_file(base, {"c1": {"case_id": "c1", "name": "老数据"}})
+    migrate_legacy_file(base)
+    assert load_all(base)["c1"]["name"] == "新数据"
+
+
+def test_migrate_leaves_a_broken_legacy_file_alone(tmp_path):
+    base = str(tmp_path)
+    path = os.path.join(base, "cases_data.json")
+    open(path, "w", encoding="utf-8").write("{ 不是 json")
+    migrate_legacy_file(base)
+    assert os.path.exists(path), "读不出来时不该动原文件"

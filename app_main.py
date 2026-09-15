@@ -1,6 +1,5 @@
 import os
 import json
-import re
 import shutil
 import datetime
 import logging
@@ -23,8 +22,8 @@ from ui_main_build import MainWindowUI, ROLE_IDENTITY_HINT, ROLE_IDENTITY_LABEL
 # 控件类搬到了 material_list.py；这里保留一份再导出，外部 `from app_main import
 # MaterialListWidget` 的老写法仍然可用
 from material_list import MaterialListWidget  # noqa: F401
-from case_store import (SCHEMA_VERSION, is_newer_version, migrate_case,
-                        pack_case, unpack_case)
+import case_store
+from case_store import pack_case, unpack_case
 from services import (FileService, DataService, TemplateVariableManager,
                       PERSON_BASE_FIELDS, person_flat_key, witness_seq_label)
 from ai_service import AIService
@@ -76,15 +75,8 @@ def _timestamp_now() -> str:
 # witness_seq_label）见 services.py；「身份」输入行的角色文案见 ui_main_build.py。
 
 
-# 案件数据的磁盘布局：一案一文件，<BASE_PATH>/<案本号>/case.json
-# （与生成的文书同处一个案卷文件夹）。**分块结构本身见 case_store.py**——
-# pack_case / unpack_case / migrate_case 与 schema 版本都在那边，纯函数、可直接单测。
-_CASE_FILE_NAME = "case.json"
-_LEGACY_CASES_FILE = "cases_data.json"      # 旧版「一个全库文件」，仅迁移时读
-
-# 保存前的备份层
-_BACKUP_DIR = "backups"        # 每日快照目录（与案件目录同级）
-_SNAPSHOT_KEEP = 30            # 每日快照保留份数
+# 案件数据的磁盘结构（分块格式）与落盘布局（一案一文件、备份、老档迁移）
+# 整套都在 case_store.py。本文件里只剩 MainWindow 那层绑 BASE_PATH 的薄封装。
 
 
 # 角色 → 谈话笔录生成配置（提示词 key / 笔录 docx 模板 / 模板占位符数据方法）——单一事实源
@@ -947,266 +939,54 @@ class MainWindow(MainWindowUI):
     # ========================================================================
 
     # ---- 案件数据的磁盘布局：一案一文件 ----
-    # 每个案件的数据是 <BASE_PATH>/<案本号>/case.json，与它生成的文书同处一个案卷文件夹，
-    # 而不是全部挤在一个 cases_data.json 里。好处：某个案件的文件坏了只影响它自己；
-    # 数据跟着案卷走，删/拷一个案卷就是删/拷一个案件。
+    # 实现在 case_store.py —— 把 base_path 显式当参数传进去，就不必构造窗口也能
+    # 单测（见 tests/test_case_store.py）。这里留一层薄封装，把 self.BASE_PATH 绑上，
+    # 免得 40 多处调用点全要改成 case_store.xxx(self.BASE_PATH, ...)。
 
     def _legacy_cases_path(self) -> str:
-        """旧版「一个全库文件」的路径（只在迁移时用到）"""
-        return os.path.join(self.BASE_PATH, _LEGACY_CASES_FILE)
+        return case_store.legacy_cases_path(self.BASE_PATH)
 
     @staticmethod
-    def _safe_case_dirname(case_id: str) -> str:
-        """案本号 → 可当 Windows 目录名：换掉非法字符、去掉首尾的点和空格；空了给个占位名"""
-        name = re.sub(r'[\\/:*?"<>|\r\n\t]', '_', str(case_id or '')).strip(' .')
-        return name or '未命名案件'
+    def _safe_case_dirname(case_id):
+        return case_store.safe_case_dirname(case_id)
 
     @staticmethod
-    def _year_for_case(case_id: str) -> str:
-        """归档年份：优先取案本号里的立案日期（那本来就是立案时的系统时间），
-        取不到再用当前系统年份。"""
-        text = str(case_id or '')
-        m = (re.search(r'(?:案本|工亡)(20\d{2})\d{4}', text)
-             or re.search(r'(20\d{2})\d{2}\d{2}', text))
-        return m.group(1) if m else str(datetime.datetime.now().year)
+    def _year_for_case(case_id):
+        return case_store.year_for_case(case_id)
 
     def _locate_case_dir(self, case_id: str) -> str:
-        """找已存在的案卷目录，找不到返回空串。
-
-        两种布局都认：<BASE>/<年份>/<案本号>（分年份之后）与 <BASE>/<案本号>
-        （分年份之前存的）。老案卷命中后**留在原地**——搬它就会把同处一处的
-        文书和数据分开，也会让用户以为文件丢了。
-        """
-        name = self._safe_case_dirname(case_id)
-        plain = os.path.join(self.BASE_PATH, name)
-        if os.path.isdir(plain):
-            return plain
-        try:
-            for entry in sorted(os.listdir(self.BASE_PATH)):
-                cand = os.path.join(self.BASE_PATH, entry, name)
-                if os.path.isdir(cand):
-                    return cand
-        except OSError:
-            pass
-        return ''
+        return case_store.locate_case_dir(self.BASE_PATH, case_id)
 
     def _case_dir(self, case_id: str) -> str:
-        """某个案件的案卷目录（案件数据与它生成的文书同处一处）
-
-        已存在的按原位返回；新案件落到 <BASE_PATH>/<年份>/<案本号>/。年份只在
-        第一次落盘时定下（写在目录名上），之后靠"找得到就用原来的"保证不会被搬走。
-        """
-        found = self._locate_case_dir(case_id)
-        if found:
-            return found
-        return os.path.join(self.BASE_PATH, self._year_for_case(case_id),
-                            self._safe_case_dirname(case_id))
+        return case_store.case_dir(self.BASE_PATH, case_id)
 
     def _case_file(self, case_id: str) -> str:
-        """某个案件的数据文件"""
-        return os.path.join(self._case_dir(case_id), _CASE_FILE_NAME)
+        return case_store.case_file(self.BASE_PATH, case_id)
 
     def _iter_case_files(self):
-        """遍历现有案件数据文件，产出 (案本号, 文件路径)
-
-        两种布局都认：<BASE>/<年份>/<案本号>/case.json 与 <BASE>/<案本号>/case.json。
-        案本号是定位依据——新布局里它是年份目录的下一层，老布局里就是第一层。
-        """
-        try:
-            entries = sorted(os.listdir(self.BASE_PATH))
-        except OSError:
-            return
-        for entry in entries:
-            top = os.path.join(self.BASE_PATH, entry)
-            if not os.path.isdir(top):
-                continue
-            path = os.path.join(top, _CASE_FILE_NAME)
-            if os.path.isfile(path):
-                yield entry, path                      # 老布局：<BASE>/<案本号>/
-                continue
-            try:
-                for name in sorted(os.listdir(top)):
-                    p = os.path.join(top, name, _CASE_FILE_NAME)
-                    if os.path.isfile(p):
-                        yield name, p                  # 新布局：<BASE>/<年份>/<案本号>/
-            except OSError:
-                pass
+        return case_store.iter_case_files(self.BASE_PATH)
 
     def _load_cases_data(self) -> Dict[str, Any]:
-        """加载全部案件，返回 {case_id: case_obj}
-
-        单个案件的文件读不出来，只跳过它自己并记 ERROR，不影响其它案件——这正是从
-        「一个全库文件」改成一案一文件要买的东西。版本高于本程序时仍照旧读出来，只记 ERROR。
-        """
-        self._migrate_legacy_cases_file()
-        out: Dict[str, Any] = {}
-        for dirname, path in self._iter_case_files():
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    blk = json.load(f)
-            except Exception as e:
-                logger.error("❌ 跳过读不出来的案件文件 %s: %s", path, e)
-                continue
-            if not isinstance(blk, dict):
-                logger.error("❌ 跳过结构异常的案件文件（顶层不是对象）: %s", path)
-                continue
-            disk_version = blk.get('version')
-            if is_newer_version(disk_version):
-                logger.error(
-                    "❌ 案件数据版本(%s)高于本程序支持的(%s)——应是更新版程序写的。"
-                    "保存时会先自动备份原文件，但请尽快改用新版程序打开，"
-                    "否则新版本新增的字段可能在这里丢失。",
-                    disk_version, SCHEMA_VERSION)
-            if str(blk.get('case_id', '') or '').strip() not in ('', dirname):
-                logger.warning("⚠️ 案件文件里的 case_id(%s) 与目录名(%s) 不一致，以目录名为准",
-                               blk.get('case_id'), dirname)
-            flat = migrate_case(unpack_case(blk))
-            flat['case_id'] = dirname          # 目录名是定位依据，文件里的只作校验
-            out[dirname] = flat
-        return out
+        return case_store.load_all(self.BASE_PATH)
 
     def _write_case_file(self, case_id: str, block: Dict[str, Any]) -> str:
-        """原子写单个案件文件；写前把旧内容转存 .bak（每次刷新 = 「撤销上一次保存」）
-
-        直接以 'w' 打开会立刻截断，写到一半崩溃或磁盘写满，这个案件就没了，
-        所以先写 .tmp 再 os.replace。
-        """
-        path = self._case_file(case_id)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump({"version": SCHEMA_VERSION, **block},
-                      f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        # 备份放在「新内容已经写进 .tmp 但还没替换」这一步，而不是开头：
-        # 写失败时不该把上一次的回滚点也覆盖掉，否则一次失败的保存会白丢一个还原点。
-        if os.path.exists(path):
-            try:
-                shutil.copy2(path, path + '.bak')
-            except Exception as e:
-                logger.warning("⚠️ 备份案件文件失败（继续）: %s", e)
-        os.replace(tmp, path)
-        return path
+        return case_store.write_case(self.BASE_PATH, case_id, block)
 
     def _drop_case_files_not_in(self, keep_ids) -> None:
-        """删掉「磁盘上有、这次却没保存」的案件数据文件（维持「写全量」的语义）
-
-        只删 case.json / case.json.bak，**不动案卷里的文书**——文书是办案成果，
-        不该因为数据里没有这个案子就被清掉。
-        """
-        keep = {self._safe_case_dirname(cid) for cid in keep_ids}
-        for dirname, path in list(self._iter_case_files()):
-            if dirname in keep:
-                continue
-            for p in (path, path + '.bak'):
-                try:
-                    if os.path.exists(p):
-                        os.remove(p)
-                        logger.info("🗑️ 已删除不再存在的案件数据: %s", p)
-                except Exception as e:
-                    logger.warning("⚠️ 删除案件数据失败 %s: %s", p, e)
+        return case_store.drop_case_files_not_in(self.BASE_PATH, keep_ids)
 
     def _daily_snapshot(self, packed: Dict[str, Any]) -> None:
-        """当天第一份快照（仍是「一份全库」，与改造前同名同语义）；顺带清掉过老的快照"""
-        backup_dir = os.path.join(self.BASE_PATH, _BACKUP_DIR)
-        os.makedirs(backup_dir, exist_ok=True)
-        stamp = datetime.datetime.now().strftime("%Y%m%d")
-        dest = os.path.join(backup_dir, f"cases_data_{stamp}.json")
-        if os.path.exists(dest):
-            return
-        with open(dest, 'w', encoding='utf-8') as f:
-            json.dump({"version": SCHEMA_VERSION, "cases": packed},
-                      f, ensure_ascii=False, indent=2)
-        logger.info("📦 已生成当日案件数据快照: %s", dest)
-        stale = sorted(f for f in os.listdir(backup_dir)
-                       if f.startswith("cases_data_") and f.endswith(".json"))
-        for old in stale[:-_SNAPSHOT_KEEP]:
-            try:
-                os.remove(os.path.join(backup_dir, old))
-            except Exception:
-                pass
+        return case_store.daily_snapshot(self.BASE_PATH, packed)
 
     def _save_cases_data(self, cases: Dict[str, Any]) -> bool:
-        """保存全部案件（一案一文件；内存 flat → 磁盘分块 v3）
-
-        每个文件各自原子写：某个案件写失败只影响它自己，不会连带丢掉别的案件。代价是
-        N 个文件做不到「跨案件全有全无」——中途失败会留下部分已写，下次保存会再刷一遍
-        （幂等），所以这里只把失败如实返回 False。
-        传入的字典是「全部真相」：磁盘上有、字典里没有的案件数据文件会被删掉（只删数据，不动文书）。
-        """
-        try:
-            os.makedirs(self.BASE_PATH, exist_ok=True)
-            packed = {cid: pack_case(c) for cid, c in cases.items()}
-            for cid, blk in packed.items():
-                self._write_case_file(cid, blk)
-            self._drop_case_files_not_in(packed)
-            self._daily_snapshot(packed)
-            print(f"✅ 案件数据已保存: {len(packed)} 个案件（一案一文件）")
-            return True
-        except Exception as e:
-            logger.error("❌ 保存案件数据失败: %s", e)
-            return False
+        return case_store.save_all(self.BASE_PATH, cases)
 
     def _migrate_legacy_cases_file(self) -> None:
-        """把旧的「一个全库文件」拆成一案一文件（幂等、可回退）
-
-        - 触发：<BASE_PATH>/cases_data.json 还在（迁移成功后它被改名 .migrated，不再触发）
-        - 原文件只改名不删除：cases_data.json → cases_data.json.migrated，便于切回旧版程序
-        - 版本非当前时另留一份 cases_data.json.v2.bak（原样备份，旧版程序能读）
-        - 已存在的案件文件不覆盖：中途失败下次启动接着补，不会把新数据盖掉
-        - 任何失败都不动原文件，下次启动重试
-        """
-        legacy = self._legacy_cases_path()
-        if not os.path.exists(legacy):
-            return
-        try:
-            with open(legacy, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error("❌ 旧案件数据读不出来，跳过迁移: %s", e)
-            return
-        if not (isinstance(data, dict) and isinstance(data.get('cases'), dict)):
-            logger.error("❌ 旧案件数据结构异常（顶层缺少 cases 对象），跳过迁移: %s", legacy)
-            return
-
-        legacy_version = data.get('version')
-        try:
-            written = skipped = 0
-            for cid, blk in data['cases'].items():
-                if os.path.exists(self._case_file(cid)):
-                    skipped += 1
-                    continue
-                flat = migrate_case(unpack_case(blk))
-                flat['case_id'] = cid          # 旧文件里案件字典的键就是案本号
-                self._write_case_file(cid, pack_case(flat))
-                written += 1
-            # 全部写成功后才动原文件
-            if legacy_version not in ('', SCHEMA_VERSION):
-                bak = legacy + '.v2.bak'
-                if not os.path.exists(bak):
-                    shutil.copy2(legacy, bak)
-                    print(f"📦 已保留升级前的原案件数据: {bak}")
-            os.replace(legacy, legacy + '.migrated')
-            logger.info("📦 已迁移为一案一文件：新写 %d 个、跳过已存在 %d 个", written, skipped)
-            print(f"📦 案件数据已拆成一案一文件（新写 {written} 个），"
-                  f"原文件改名 {_LEGACY_CASES_FILE}.migrated 留底")
-        except Exception as e:
-            logger.error("❌ 迁移为一案一文件失败（原文件保持不动，下次启动重试）: %s", e)
+        return case_store.migrate_legacy_file(self.BASE_PATH)
 
     def _update_case_field(self, case_number: str, **fields) -> bool:
-        """把字段写回 cases_data.json 的指定案件"""
-        try:
-            cases = self._load_cases_data()
-            case_obj = cases.get(case_number)
-            if case_obj is None:
-                return False
-            case_obj.update(fields)
-            self._save_cases_data(cases)
-            return True
-        except Exception as e:
-            logger.warning(f"⚠️ 更新案件字段失败（非致命）: {e}")
-            return False
+        return case_store.update_case_field(self.BASE_PATH, case_number, **fields)
+
 
     def _refresh_evidence_list(self, *_ignored):
         """按当前的 拟用条例 / 工亡案件 / 个人案件 重算材料清单。

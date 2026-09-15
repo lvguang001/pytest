@@ -9,7 +9,7 @@
   多处改动用「；」分隔，大改动在正文分条列要点。参考 `git log` 已有风格
 - **注释用中文**，密度随现有代码
 - **直接提交到 `master`**（本仓库历史一直是线性直提，没有分支流程）
-- 改动前后都跑 `python -m pytest`（53 个用例，约 2 秒）
+- 改动前后都跑 `python -m pytest`（103 个用例，约 2 秒）
 
 ## 架构要点
 
@@ -29,13 +29,24 @@ case_id / case_info / injured_worker / witnesses[] / legal_reps[] / family_reps[
 转换只发生在持久化的两端：
 
 ```
-_load_cases_data:  磁盘分块 --unpack_case()--> flat
-_save_cases_data:  flat --pack_case()-------> 磁盘分块
+case_store.load_all:  磁盘分块 --unpack_case()--> flat
+case_store.save_all:  flat --pack_case()-------> 磁盘分块
 ```
 
-**这块投影层整个在 `case_store.py` 里**（`pack_case` / `unpack_case` /
-`migrate_case` / `SCHEMA_VERSION`）。它不碰文件系统、不依赖 MainWindow，
-所以可以直接单测——`tests/test_case_store.py` 已覆盖。改这里先跑它。
+**整套磁盘逻辑都在 `case_store.py` 里**，分两层：
+
+- **分块格式**（`pack_case` / `unpack_case` / `migrate_case` / `SCHEMA_VERSION`）
+  —— 纯函数，不碰文件系统
+- **落盘布局**（`case_dir` / `load_all` / `write_case` / `save_all` /
+  `migrate_legacy_file` / `daily_snapshot` …）
+  —— 一案一文件、按年份分层、写前备份、老档拆分
+
+2026-09 从 MainWindow 里搬出来并把 `base_path` 显式当参数传，因此不用构造窗口
+就能直接单测——`tests/test_case_store.py` 已覆盖（含原子写、删数据不连坐文书、
+老档迁移幂等）。**改这里先跑它。**
+
+`MainWindow` 上仍留着一层同名薄封装（`self._load_cases_data()` 等），只做
+「绑定 `self.BASE_PATH`」——40 多处调用点因此不用改。
 
 **所以改动时不要动下游的读取代码**，只在 `pack_case` / `unpack_case` 里调整。
 新增字段时想清楚它该进 `case_info` 还是 `injured_worker`
