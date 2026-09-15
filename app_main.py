@@ -15,22 +15,24 @@ from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QMessageBox, QDialog, QVBoxLayout,
     QLabel, QTextEdit, QPushButton, QHBoxLayout, QInputDialog,
-    QLineEdit, QComboBox, QCompleter, QCheckBox, QProgressDialog,
+    QLineEdit, QCompleter, QCheckBox, QProgressDialog,
     QTableWidget, QTableWidgetItem,
-    QGroupBox
 )
 from PyQt5.QtGui import QFont
-from ui_main_window import Ui_Form
+from ui_main_build import MainWindowUI
+# 控件类搬到了 material_list.py；这里保留一份再导出，外部 `from app_main import
+# MaterialListWidget` 的老写法仍然可用
+from material_list import MaterialListWidget  # noqa: F401
 from services import FileService, DataService, TemplateVariableManager
 from ai_service import AIService
 from case_classifier import CaseClassifier
 from config_service import ConfigService
 from path_utils import path_utils
 import log_utils
-from main import UserManager, PasswordLineEdit
+from main import UserManager
 from service_flow import (derive, initial_sf, confirm_delivery, revert_to_ask,
                           delivered_again, finish_flow, DOC_LABEL, today_iso)
-from todo_board import (TodoBoard, DeliveryConfirmDialog, PostalTrackingDialog,
+from todo_board import (DeliveryConfirmDialog, PostalTrackingDialog,
                         DecisionConfirmDialog)
 
 logger = logging.getLogger(__name__)
@@ -707,212 +709,6 @@ class CaseDataModel:
 
 
 # ============================================================================
-# 关键证据定义（缺失时AI必须在笔录中追问）
-# ============================================================================
-class MaterialListWidget(QWidget):
-    """替代原有 QTextEdit 的材料管理组件。
-
-    每行: [☑/☐ 复选框] [材料名称] [备注输入框]
-    - 勾选 = 已提供
-    - 未勾选 = 缺失，生成笔录时AI会追问
-    - 备注 = 对该材料的补充说明
-    """
-
-    materials_changed = pyqtSignal()  # 材料变更信号
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._rows: List[Dict[str, Any]] = []  # [{name, provided, notes, widget_refs}]
-        self._init_ui()
-
-    def _init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(1)
-
-        # 滚动区域
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setStyleSheet("""
-            QScrollArea {
-                border: 1px solid #ccc;
-                border-radius: 2px;
-                background-color: #fafafa;
-            }
-        """)
-
-        # 内容容器
-        self._container = QWidget()
-        self._container.setStyleSheet("background-color: #fafafa;")
-        self._row_layout = QVBoxLayout(self._container)
-        self._row_layout.setContentsMargins(4, 2, 4, 2)
-        self._row_layout.setSpacing(2)
-        self._row_layout.addStretch()  # 底部弹簧，把行推到顶部
-
-        self.scroll.setWidget(self._container)
-        layout.addWidget(self.scroll)
-
-    REQUIRED_COLOR = "#e75480"    # 必要证据：粉红
-    POSSIBLE_COLOR = "#000000"    # 可能证据：黑
-
-    @staticmethod
-    def _edit_css(color: str) -> str:
-        return f"""
-            QLineEdit {{
-                font-size: 8pt;
-                color: {color};
-                border: 1px solid #ddd;
-                border-radius: 1px;
-                padding: 1px 3px;
-                background-color: #fff;
-            }}
-            QLineEdit:focus {{
-                border-color: #3498db;
-            }}
-        """
-
-    def _make_row(self, name: str = "", provided: bool = False, notes: str = "",
-                  required: bool = False):
-        """创建一行材料条目；required=True 时名称用粉红标出"""
-        row = QWidget()
-        row.setFixedHeight(23)
-        h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(3)
-
-        # 复选框
-        cb = QCheckBox()
-        cb.setChecked(provided)
-        cb.setFixedWidth(18)
-        cb.setToolTip("勾选=已提供  |  不勾选=缺失")
-        cb.toggled.connect(self._on_changed)
-
-        # 材料名称输入框（可编辑）
-        name_edit = QLineEdit(name if name else "")
-        name_edit.setPlaceholderText("材料名称...")
-        name_edit.setStyleSheet(
-            self._edit_css(self.REQUIRED_COLOR if required else self.POSSIBLE_COLOR))
-        name_edit.setMinimumWidth(140)
-
-        # 名字放不下时靠悬停看全（自动生成的证据名可以很长），随文本更新
-        def _sync_tip(txt, edit=name_edit, req=required):
-            edit.setToolTip(("必要证据\n" if req else "") + (txt or "材料名称"))
-
-        _sync_tip(name)
-        name_edit.textChanged.connect(_sync_tip)
-        name_edit.textChanged.connect(self._on_changed)
-
-        # 备注输入框（一律黑色，不跟着必要项变粉）
-        note_edit = QLineEdit()
-        note_edit.setText(notes)
-        note_edit.setPlaceholderText("备注...")
-        note_edit.setStyleSheet(self._edit_css(self.POSSIBLE_COLOR))
-        note_edit.textChanged.connect(self._on_changed)
-
-        h.addWidget(cb)
-        # 名称栏要比备注宽：自动生成的证据名可能很长（如
-        # 「近亲属关系证明（户口簿/结婚证等）」），挤窄了就看不清
-        h.addWidget(name_edit, 3)
-        h.addWidget(note_edit, 2)
-
-        return row, cb, name_edit, note_edit
-
-    def add_row(self, name: str = "", provided: bool = False, notes: str = "",
-                required: bool = False, generated: bool = False):
-        """在末尾添加一行。
-
-        generated=True 表示这行是按证据清单自动生成（换条例时会被重建）；
-        案件自带的、以及手工添加的行不是 generated，重建时保留。
-        """
-        row, cb, name_edit, note = self._make_row(name, provided, notes, required)
-        # 在 stretch 之前插入
-        self._row_layout.insertWidget(self._row_layout.count() - 1, row)
-
-        item = {
-            "name": name,
-            "provided": provided,
-            "notes": notes,
-            "_cb": cb,
-            "_name_edit": name_edit,
-            "_note": note,
-            "_row": row,
-            "_required": required,
-            "_generated": generated,
-        }
-        self._rows.append(item)
-
-    def apply_evidence_list(self, items):
-        """按证据清单重建「自动生成」的行；已勾选状态按名称沿用。
-
-        案件自带/手工添加的行不动，同名项也不重复添加。
-        """
-        kept_state = {r["_name_edit"].text(): (r["_cb"].isChecked(), r["_note"].text())
-                      for r in self._rows}
-
-        for r in [r for r in self._rows if r.get("_generated")]:
-            r["_row"].setParent(None)
-            self._rows.remove(r)
-
-        # 必须在删掉旧的自动行之后再算——否则刚被删掉的名字仍算「已存在」，
-        # 新的清单里同名项会被跳过，永远加不回来（切到工亡时死亡证明就是这样丢的）
-        existing = {r["_name_edit"].text() for r in self._rows}
-
-        for name, required in items:
-            if name in existing:
-                continue
-            provided, notes = kept_state.get(name, (False, ""))
-            self.add_row(name, provided, notes, required=required, generated=True)
-        self._on_changed()
-
-    def set_materials(self, data: List[Dict[str, Any]]):
-        """批量设置材料列表"""
-        self.clear()
-        for item in data:
-            self.add_row(
-                name=item.get("name", ""),
-                provided=item.get("provided", False),
-                notes=item.get("notes", "")
-            )
-
-    def get_materials(self) -> List[Dict[str, Any]]:
-        """获取所有材料数据（同步UI状态）"""
-        result = []
-        for row in self._rows:
-            result.append({
-                "name": row["_name_edit"].text(),
-                "provided": row["_cb"].isChecked(),
-                "notes": row["_note"].text(),
-            })
-        return result
-
-    def clear(self):
-        """清空所有行"""
-        for row in self._rows:
-            row["_row"].setParent(None)
-        self._rows.clear()
-
-    def get_summary_text(self) -> str:
-        """生成可复制的文本摘要"""
-        lines = []
-        for i, r in enumerate(self.get_materials(), 1):
-            status = "✓" if r["provided"] else "✗"
-            line = f"{status} {i}. {r['name']}"
-            if r["notes"]:
-                line += f"（{r['notes']}）"
-            lines.append(line)
-        return "\n".join(lines)
-
-    def copy_to_clipboard(self):
-        """复制材料摘要到剪贴板"""
-        text = self.get_summary_text()
-        QApplication.clipboard().setText(text)
-
-    def _on_changed(self):
-        """复选框或备注变更时发出信号"""
-        self.materials_changed.emit()
-
-
-# ============================================================================
 # CaseDataReviewDialog — 数据核对窗口（以 JSON 文本形式显示并可编辑）
 # ============================================================================
 
@@ -1065,29 +861,37 @@ class ApprovalDecisionDialog(QDialog):
         return self.choice
 
 
-class MainWindow(QWidget, Ui_Form):
+class MainWindow(MainWindowUI):
+    """主界面业务逻辑。
+
+    界面构建（建控件 + 用布局管理器摆位置）在 ui_main_build.MainWindowUI，
+    这里只剩业务；信号统一在 _connect_signals() 里接。
+    """
 
     def __init__(self, parent=None, *args, **kwargs):
+        # 建界面 + 用布局管理器摆好位置（见 ui_main_build.MainWindowUI）
         super().__init__(parent, *args, **kwargs)
-        self.setupUi(self)
-        self._setup_radio_connections()
+
+        # .ui 里是驼峰名，这里补两个下划线别名给业务代码用
+        self.death_case_checkbox = self.findChild(QCheckBox, "deathCaseCheckbox")
+        self.personal_application_checkbox = self.findChild(QCheckBox, "personalApplicationCheckbox")
+
+        # 信号统一在这里接（老代码散在 __init__ 内联、_setup_api_config_ui、
+        # _setup_witness_ui、_setup_radio_connections、_install_todo_kanban 五处）。
+        # 必须早接：api_user_combo、company_pane 那几条会在下面的初始化过程中
+        # 就触发一次，晚接会漏掉这次触发。
+        self._connect_signals()
 
         self._test_data_index = -1  # F2 测试数据轮换索引
         self.current_case_id = ""  # 当前案件案本号（跨角色/跨步骤保持同案关联）
 
         # lineEdit_2 改为案本号显示
         self.label_10.setText("案本号：")
-        self.lineEdit_2.setGeometry(80, 130, 180, 20)
         self.lineEdit_2.setPlaceholderText("输入本人姓名后自动生成")
 
-        # 输入本人姓名后自动生成案本号
-        self.name_pane.editingFinished.connect(self._on_name_pane_changed)
-
-        # 创建用户管理器并整合API配置UI
+        # 创建用户管理器
         self.user_manager = UserManager()
-        self._setup_api_config_ui()
         self._load_saved_user_config()
-        self._setup_witness_ui()
 
         # 第一步：统一设置所有路径（必须在所有服务初始化之前）
         print("=" * 50)
@@ -1104,9 +908,6 @@ class MainWindow(QWidget, Ui_Form):
 
         # 第三步：初始化组合框数据（必须在路径设置之后）
         self.init_combobox_data()
-
-        # 工伤告知书按钮连接
-        self.pushButton_7.clicked.connect(self.generate_injury_notice)
 
         # 第四步：初始化其他核心服务（使用正确的路径）
         self.file_service = FileService(self.BASE_PATH)
@@ -1127,25 +928,11 @@ class MainWindow(QWidget, Ui_Form):
         self._template_dict = self.data_model.to_template_dict()
         self.current_case_folder = None
         self.current_person_name = ""
-        # self.case_versions = {}  # 注释掉，如果不再使用
-
-        # 获取复选框控件
-        self.death_case_checkbox = self.findChild(QCheckBox, "deathCaseCheckbox")
-        self.personal_application_checkbox = self.findChild(QCheckBox, "personalApplicationCheckbox")
-
-        # 连接信号
-        self.death_case_checkbox.stateChanged.connect(self.on_case_type_changed)
-        self.personal_application_checkbox.stateChanged.connect(self.on_case_type_changed)
 
         # 初始化数据
         case_config = self.config_service.get_case_config()
         self.set_data('案件性质', case_config.default_case_type, 'case')
         self.set_data('申请类型', case_config.default_application_type, 'case')
-
-        # 连接公司相关信号
-        self.company_pane.currentTextChanged.connect(self.company)
-        self.construction_company.currentTextChanged.connect(self.sync_employer_to_dict)
-        self.construction_plant.currentTextChanged.connect(self.c_plant)
 
         # 初始化案件类型下拉框（全部条例情形，来自 case_classifier）
         for _short in REGULATION_OPTIONS:
@@ -1157,27 +944,19 @@ class MainWindow(QWidget, Ui_Form):
         # 应用UI设置
         self._apply_ui_settings()
 
-        # 搜索按钮
-        self.pushButton_6.clicked.connect(self.smart_search_cases)
-
         # 初始化AI服务（使用传入的api_config）
         self.ai_service = None  # 先初始化为None
         self.init_ai_service()
 
-        # 连接AI审查按钮
-        self.pushButton_ai_review.clicked.connect(self.ai_review_document)
-        self._reconnect_approval_button()
-        # 谈话通知书按钮连接
-        self.pushButton_12.clicked.connect(self.on_pushButton_12_clicked)
-
-        try:
-            self.pushButton.clicked.disconnect()
-        except TypeError:
-            pass
-        self.pushButton.clicked.connect(self.on_talk_button_clicked)
-
         # 初始状态设为可用
         self.pushButton.setEnabled(True)
+
+        # 单位性质 / 身份 的选项与文案。界面构建类不引用本文件的常量，故在这里补；
+        # 必须等数据模型建好——填入选项会触发一次证据清单重算。
+        self.unit_type_combo.addItems(UNIT_TYPES)
+        self.unit_type_combo.setCurrentText(DEFAULT_UNIT_TYPE)
+        self.identity_label.setText(_ROLE_IDENTITY_LABEL["本人"])
+        self.identity_edit.setPlaceholderText(DEFAULT_IDENTITY)
 
         # 验证模板路径（使用已获取的路径）
         if os.path.exists(self.TEMPLATE_PATH):
@@ -1187,41 +966,80 @@ class MainWindow(QWidget, Ui_Form):
         else:
             logger.error(f"❌ 模板路径不存在: {self.TEMPLATE_PATH}")
 
-        self._setup_unit_identity_ui()  # 单位性质下拉 + 共享“身份”输入行（含其下控件下移）
-
-        self._install_todo_kanban()  # 待办事项看板（顶栏之下，含 60s 自动刷新）
-
-        # 放在最后：上面几个 _setup_xxx_ui() 会整体位移控件，
-        # 早调用会把方框画在位移前的位置上
-        # 布局微调。顺序有讲究：_move_unit_type_row 会整体下移下方的控件，
-        # 其余几条按当前坐标算位置，所以它必须最先执行。
-        self._move_unit_type_row()    # 单位性质移到案本号之下、独占一行
-        self._compact_identity_row()  # 身份并入电话/岗位行，收掉空行
-        self._move_time_fields_up()   # 时间字段移到拟用条例下方
-        self._compact_doc_buttons()   # 底部三个按钮并成一组
-        self._move_witness_row_up()   # 证人编号行移到单位性质那行并常显
-        self._setup_status_boxes()    # 两处提示位的常显方框
-        self._relocate_talk_button()  # 谈话笔录按钮移到身份证导入之后
-        self._align_role_radios()     # 家属抬到与本人/证人/法人同一行
-        # 必须排在上面几条之后：统一行距是按 y 邻近把控件归成"行"的，
-        # 若行内的控件还没对齐（如 label_15 尚未与 label_14 对齐、家属尚未
-        # 与其它角色齐平），同一行会被拆成两行、越推越散。
-        self._uniform_row_spacing()
-        # 右栏两框加大、底边与左栏最后一行齐平（依赖上一步定下的左栏位置）
-        self._grow_right_panels()
+        self._install_todo_kanban()  # 待办事项看板（含 60 分钟定时刷新）
 
         # 证据清单：启动时先按当前条例/案件性质/申请类型列一遍，
-        # 之后三者任一变化都跟着重算
+        # 之后三者任一变化都跟着重算（那几个信号已在 _connect_signals() 接好）
         self._refresh_evidence_list()
-        self.comboBox.currentIndexChanged.connect(self._refresh_evidence_list)
-        self.death_case_checkbox.stateChanged.connect(self._refresh_evidence_list)
-        self.personal_application_checkbox.stateChanged.connect(self._refresh_evidence_list)
-        if hasattr(self, 'unit_type_combo'):
-            self.unit_type_combo.currentTextChanged.connect(self._refresh_evidence_list)
 
         print("=" * 50)
         print("🎉 MainWindow 初始化完成")
         print("=" * 50)
+
+    def _connect_signals(self):
+        """所有信号连接集中在这里。
+
+        `ui_main_window.Ui_Form.setupUi()` 自己接过一批（身份证号 editingFinished、
+        身份证导入、三个保存按钮、四个角色单选、谈话通知书按钮），那份是生成代码，
+        本次不动；这里只接原先散在 MainWindow 各处的那些。
+        """
+        # —— 共享人字段表单 ——
+        self.name_pane.editingFinished.connect(self._on_name_pane_changed)
+
+        # —— 单位 / 工地（三个可编辑下拉）——
+        self.company_pane.currentTextChanged.connect(self.company)
+        self.construction_company.currentTextChanged.connect(self.sync_employer_to_dict)
+        self.construction_plant.currentTextChanged.connect(self.c_plant)
+
+        # —— 案件类型与条例 ——
+        self.death_case_checkbox.stateChanged.connect(self.on_case_type_changed)
+        self.personal_application_checkbox.stateChanged.connect(self.on_case_type_changed)
+        self.comboBox.currentIndexChanged.connect(self._refresh_evidence_list)
+        self.death_case_checkbox.stateChanged.connect(self._refresh_evidence_list)
+        self.personal_application_checkbox.stateChanged.connect(self._refresh_evidence_list)
+        self.unit_type_combo.currentTextChanged.connect(self._refresh_evidence_list)
+
+        # —— 四个时间字段 ——
+        for edit in (self.apply_time_edit, self.accept_time_edit,
+                     self.injury_time_edit, self.visit_time_edit):
+            edit.editingFinished.connect(self._save_date_inputs)
+
+        # —— 证人编号 ——
+        self.witness_combo.currentIndexChanged.connect(self._on_witness_selected)
+        self.add_witness_btn.clicked.connect(self._add_witness)
+
+        # —— 顶栏与两个浮层 ——
+        self.config_toggle_btn.clicked.connect(self._toggle_config_panel)
+        self.todo_btn.clicked.connect(self._toggle_todo_panel)
+        self.todo_board.taskClicked.connect(self._on_board_task_click)
+        self.api_user_combo.currentTextChanged.connect(self._on_user_combo_changed)
+        self.api_key_input.editingFinished.connect(self._on_api_edited)
+        try:
+            self.api_user_combo.lineEdit().editingFinished.connect(self._on_api_edited)
+        except Exception:
+            pass
+
+        # —— 主操作按钮 ——
+        self.pushButton_6.clicked.connect(self.smart_search_cases)
+        self.pushButton_7.clicked.connect(self.generate_injury_notice)
+        self.pushButton_11.clicked.connect(self.approve)   # 原 _reconnect_approval_button()
+        self.pushButton_ai_review.clicked.connect(self.ai_review_document)
+        # 谈话通知书：.ui 里已经接过一次，这里**再**接一次，与重构前一致
+        # （即重复连接、槽会被调用两次）——先原样保留，改不改另说
+        self.pushButton_12.clicked.connect(self.on_pushButton_12_clicked)
+        # 谈话笔录：先断开 .ui 接的那条，再接到业务方法上（与重构前一致）
+        try:
+            self.pushButton.clicked.disconnect()
+        except TypeError:
+            pass
+        self.pushButton.clicked.connect(self.on_talk_button_clicked)
+
+        # —— 右栏两个面板里的按钮（原先都是匿名控件 + lambda）——
+        self.stmt_copy_btn.clicked.connect(self._copy_statement)
+        self.stmt_clear_btn.clicked.connect(self.statement_edit.clear)
+        self.mat_copy_btn.clicked.connect(self._copy_material)
+        self.mat_clear_btn.clicked.connect(self.material_list.clear)
+        self.mat_add_btn.clicked.connect(self.material_list.add_row)
 
     def on_talk_button_clicked(self):
         """谈话笔录按钮点击事件处理 — 数据核对 + 按角色生成笔录"""
@@ -1491,7 +1309,8 @@ class MainWindow(QWidget, Ui_Form):
         self.set_data('工地名称', case_obj.get('site', ''), 'company')
 
         # 受伤经过：只写数据模型，不再回填到「案件申请陈述」框
-        # （该框已停用，回填会让用户以为改了有效——见 _setup_api_config_ui 的说明）
+        # （该框已停用，回填会让用户以为改了有效——见 ui_main_build 里
+        #  _create_right_panel_widgets 的说明）
         self.set_data('受伤经过', case_obj.get('injury_description', ''), 'investigation')
         if hasattr(self, 'statement_edit'):
             self.statement_edit.clear()   # 清掉残留，免得看着像本案陈述
@@ -1807,358 +1626,6 @@ class MainWindow(QWidget, Ui_Form):
             logger.warning(f"⚠️ 更新案件字段失败（非致命）: {e}")
             return False
 
-    # ========================================================================
-    # 单位性质 / 人员身份（支持 机关公务员、事业单位 人员工伤）
-    # ========================================================================
-
-    def _setup_unit_identity_ui(self):
-        """新增两个录入位：案件级“单位性质”下拉 + 共享人字段“身份”输入行。
-        身份行插在“岗位”行之下，故把其下（y>=419）左栏控件整体下移 22px。"""
-        # —— 1. 案件级：单位性质下拉（顶栏带右半空位，位于“个人案件”复选框右侧）——
-        self.unit_type_label = QLabel("单位性质：", self)
-        self.unit_type_label.setGeometry(300, 118, 64, 16)
-        self.unit_type_combo = QComboBox(self)
-        self.unit_type_combo.setGeometry(364, 114, 100, 24)
-        self.unit_type_combo.addItems(UNIT_TYPES)
-        self.unit_type_combo.setCurrentText(DEFAULT_UNIT_TYPE)
-        self.unit_type_combo.setEditable(True)
-        self.unit_type_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.unit_type_combo.setToolTip("案件用人单位性质：企业 / 机关（公务员） / 事业单位")
-
-        # —— 2. 共享人字段：身份输入行（标签随角色；置于“岗位”行下方）——
-        self.identity_label = QLabel("本人身份：", self)
-        self.identity_label.setGeometry(250, 404, 78, 16)
-        self.identity_edit = QLineEdit(self)
-        self.identity_edit.setGeometry(328, 401, 113, 20)
-        self.identity_edit.setPlaceholderText(DEFAULT_IDENTITY)
-        self.identity_edit.setToolTip("该谈话人身份：职工 / 公务员 / 事业编制工作人员 等")
-
-        # —— 3. 把身份行之下的左栏控件整体下移 22px（仅左栏 x<478；右面板与顶栏不受影响）——
-        try:
-            for child in self.children():
-                if isinstance(child, QWidget) and child is not self:
-                    try:
-                        g = child.geometry()
-                        if g.x() < 478 and g.y() >= 419:
-                            child.setGeometry(g.x(), g.y() + 22,
-                                              g.width(), g.height())
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    def _frame_for_label(self, lab, pad, name):
-        """在标签下面垫一个带边框的面板，返回该面板（常显，无文字时是空框）。
-
-        面板靠 lower 之后 raise 标签来保证不遮挡文字。
-        """
-        g = lab.geometry()
-        box = QFrame(self)
-        box.setObjectName(name)
-        box.setGeometry(g.x() - pad, g.y() - pad,
-                        g.width() + pad * 2, g.height() + pad * 2)
-        box.setStyleSheet(
-            f"#{name} {{ border: 1px solid #b8b8b8; border-radius: 4px;"
-            f" background: #fcfcfc; }}")
-        box.show()
-        lab.raise_()
-        return box
-
-    def _setup_status_boxes(self):
-        """给两处提示文字各垫一个常显的方框。
-
-        - label_14（左上，主提示区）：消息原先直接浮在背景上，既不显眼也看不出
-          边界，长消息还会被 341px 的宽度截断。加框并开启自动换行。
-        - label_12（身份证号右侧）：原先固定显示「信息提示」四个字，现改为空框，
-          只在身份证校验出错时显示消息。
-
-        必须在所有 _setup_xxx_ui() 之后调用——那些方法会整体位移控件，
-        早调用会按到位移前的坐标画框。
-        """
-        main = getattr(self, 'label_14', None)
-        if main is not None:
-            main.setWordWrap(True)     # 长消息换行，而不是被裁掉
-            main.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-            self.status_box = self._frame_for_label(main, 6, "status_box")
-            # 左侧静态的「信息提示：」与框内首行对齐（原本停在框的垂直居中处）
-            if hasattr(self, 'label_15'):
-                self.label_15.move(self.label_15.x(), main.y())
-
-        idp = getattr(self, 'label_12', None)
-        if idp is not None:
-            self.status_box_id = self._frame_for_label(idp, 4, "status_box_id")
-
-    def _relocate_talk_button(self):
-        """把「谈话笔录」从主体角色单选那一行，移到下方「身份证导入」之后。
-
-        需与 _setup_status_boxes() 一样在所有 _setup_xxx_ui() 之后调用——
-        那些方法会整体位移控件，早调用会按位移前的坐标摆放。
-        """
-        talk = getattr(self, 'pushButton', None)          # 谈话笔录
-        id_in = getattr(self, 'pushButton_4', None)       # 身份证导入
-        ai = getattr(self, 'pushButton_ai_review', None)  # AI审查
-        if talk is None or id_in is None:
-            return
-
-        gap = 35                                          # 与原有按钮间距一致
-        talk.move(id_in.x() + id_in.width() + gap, id_in.y())
-        if ai is not None:                                # AI审查 顺延，不重叠
-            ai.move(talk.x() + talk.width() + gap, id_in.y())
-
-    def _move_unit_type_row(self):
-        """把「单位性质」从顶栏右侧移到「案本号」之下，独占一行。
-
-        原位置在顶栏右侧、和 工亡案件/个人案件 复选框挤在一行，离案本号很远；
-        现在标签与「案本号：」上下对齐，下拉框拉长占满整行。
-
-        插入整行要给下方让位，故把案本号行以下的左栏控件整体下移 _SHIFT 像素。
-        **必须在其它布局调整之前调用**——那几条是按当前坐标算位置的，
-        先移动再让位会把方框/按钮摆到错地方。
-        """
-        lab = getattr(self, 'unit_type_label', None)
-        combo = getattr(self, 'unit_type_combo', None)
-        anchor = getattr(self, 'label_10', None)          # 「案本号：」标签
-        if lab is None or combo is None or anchor is None:
-            return
-
-        _SHIFT = 26                                       # 让位高度
-        new_y = anchor.y() + 28                           # 紧接案本号那一行
-
-        # 先让位（案本号那一行本身和 搜索 按钮不动）
-        for c in self.children():
-            if not isinstance(c, QWidget) or c is self or c in (lab, combo):
-                continue
-            g = c.geometry()
-            if g.x() < 478 and g.y() > anchor.y():
-                c.move(g.x(), g.y() + _SHIFT)
-
-        lab.move(anchor.x(), new_y)                       # 与「案本号：」上下对齐
-        combo.move(80, new_y - 2)                         # 左缘对齐案本号输入框
-        combo.resize(360, combo.height())                 # 拉长占满一行
-
-    def _compact_identity_row(self):
-        """把「身份」并进「电话 / 岗位」那一行，并收掉空出来的整行。
-
-        身份原独占一整行（在电话/岗位行下方约 23px 处）。并过来后一行放三个
-        字段，所以电话、岗位两个输入框都要缩窄才排得下（标签槽是固定的，
-        见 _ROLE_IDENTITY_LABEL 的说明）。
-
-        与 _move_unit_type_row 一样会移动控件，必须排在按当前坐标算位置的
-        那几条（方框/按钮/单选）之前。
-        """
-        phone = getattr(self, 'lineEdit_4', None)       # 电话输入
-        post_lab = getattr(self, 'label_13', None)      # 「岗位：」
-        post = getattr(self, 'lineEdit_5', None)        # 岗位输入
-        ilab = getattr(self, 'identity_label', None)
-        iedit = getattr(self, 'identity_edit', None)
-        if any(x is None for x in (phone, post_lab, post, ilab, iedit)):
-            return
-
-        # 以「电话」那一对为准对齐（三对原本差 1px）
-        row_lab_y = getattr(self, 'label_5').y()
-        row_in_y = phone.y()
-        old_gap = iedit.y() - post.y()                  # 原来两行的间距
-
-        # 先收掉空出来的那一行：其下的左栏控件整体上移。
-        # 身份那两个自己单独摆，不参与这次上移。
-        for c in self.children():
-            if not isinstance(c, QWidget) or c is self or c in (ilab, iedit):
-                continue
-            g = c.geometry()
-            if g.x() < 478 and g.y() >= iedit.y():
-                c.move(g.x(), g.y() - old_gap)
-
-        # 三个字段并排：电话 │ 岗位 │ 身份
-        phone.resize(96, phone.height())
-        post_lab.move(186, row_lab_y)
-        post.resize(70, post.height())
-        post.move(252, row_in_y)
-        ilab.setText(_ROLE_IDENTITY_LABEL.get(self.get_current_role_type(), "身份："))
-        ilab.setGeometry(334, row_lab_y, 44, ilab.height())
-        iedit.setGeometry(384, row_in_y, 57, iedit.height())
-
-    def _move_time_fields_up(self):
-        """把四个时间字段移到「拟用条例」下方，中间那几行整体下移让位。
-
-        原先它们孤零零挂在左栏最底部（按钮行之下），和「拟用条例」这类案件
-        属性离得很远。移后顺序：拟用条例 → 申请/受理 → 受伤/就诊 → 身份证导入…
-        """
-        pairs = [(getattr(self, 'lbl_apply', None), getattr(self, 'apply_time_edit', None)),
-                 (getattr(self, 'lbl_accept', None), getattr(self, 'accept_time_edit', None)),
-                 (getattr(self, 'lbl_injury', None), getattr(self, 'injury_time_edit', None)),
-                 (getattr(self, 'lbl_visit', None), getattr(self, 'visit_time_edit', None))]
-        anchor = getattr(self, 'comboBox', None)          # 拟用条例
-        if anchor is None or any(l is None or e is None for l, e in pairs):
-            return
-
-        block = [x for pair in pairs for x in pair]
-        rows = [e.geometry() for _, e in pairs]
-        block_top = min(r.y() for r in rows)
-        block_bottom = max(r.y() + r.height() for r in rows)
-        block_h = block_bottom - block_top
-
-        a = anchor.geometry()
-        gap = 4
-        new_top = a.y() + a.height() + gap
-        shift = block_h + gap                             # 中间那几行的下移量
-
-        # 中间那几行让位（时间字段自己不算）
-        for c in self.children():
-            if not isinstance(c, QWidget) or c is self:
-                continue
-            if any(c is x for x in block):
-                continue
-            g = c.geometry()
-            if g.x() < 478 and new_top <= g.y() <= block_bottom:
-                c.move(g.x(), g.y() + shift)
-
-        delta = new_top - block_top                       # 时间块上移（负值）
-        for x in block:
-            x.move(x.x(), x.y() + delta)
-
-    def _compact_doc_buttons(self):
-        """底部那行：把「谈话通知书」「工伤告知书」挪到「案件审批表」之后。
-
-        原先两者被 105px 的空档推到右边（与它们彼此之间 19px 的间距不一致），
-        看着像分成了两组。这里沿用本行已有的 19px 间距，三个按钮并成一组。
-        """
-        first = getattr(self, 'pushButton_11', None)    # 案件审批表
-        second = getattr(self, 'pushButton_12', None)   # 谈话通知书
-        third = getattr(self, 'pushButton_7', None)     # 工伤告知书
-        if any(b is None for b in (first, second, third)):
-            return
-
-        gap = third.x() - (second.x() + second.width())  # 本行现成的间距，不写死
-        x = first.x() + first.width() + gap
-        second.move(x, first.y())
-        third.move(x + second.width() + gap, first.y())
-
-    def _uniform_row_spacing(self):
-        """把左栏各行按固定行距重排。
-
-        各行间距原先从 3px 到 70px 不等——都是历次插入控件时各自挪出来的，
-        没有统一标准。这里按 y 邻近把控件归成「行」，再让相邻行保持同样的间距。
-
-        只动纵向。行高由各行自己的控件决定（住址那行天生高一些），
-        所以是「间距一致」而非「行距/顶距等分」。
-        """
-        ROW_TOL = 12     # y 相差不超过这个值算同一行（标签与输入框常有几像素错位）
-        GAP = 18         # 目标行距；取现有各行的常见值，只收紧异常的那几处
-
-        items = [c for c in self.children()
-                 if isinstance(c, QWidget) and c is not self
-                 and c.geometry().x() < 478 and c.geometry().y() >= 40]
-        if not items:
-            return
-
-        # 按 y 聚成行
-        items.sort(key=lambda c: c.geometry().y())
-        groups, cur = [], [items[0]]
-        for c in items[1:]:
-            if c.geometry().y() - cur[-1].geometry().y() <= ROW_TOL:
-                cur.append(c)
-            else:
-                groups.append(cur)
-                cur = [c]
-        groups.append(cur)
-
-        # 逐行下推：每行顶部 = 上一行底部 + GAP
-        cursor = min(c.geometry().y() for c in groups[0])
-        for grp in groups:
-            top = min(c.geometry().y() for c in grp)
-            bottom = max(c.geometry().y() + c.geometry().height() for c in grp)
-            delta = cursor - top
-            if delta:
-                for c in grp:
-                    c.move(c.x(), c.y() + delta)
-            cursor += (bottom - top) + GAP
-
-    @staticmethod
-    def _fit_group_content(group):
-        """把分组框内的主体控件撑高、按钮贴底，让框加高后内容也跟着长大。"""
-        kids = [c for c in group.children()
-                if isinstance(c, QWidget) and c.parent() is group]
-        buttons = [c for c in kids if isinstance(c, QPushButton)]
-        bodies = [c for c in kids if not isinstance(c, QPushButton)]
-        if not kids:
-            return
-
-        BOTTOM_PAD, BODY_GAP = 5, 4
-        btn_h = buttons[0].height() if buttons else 0
-        btn_y = group.height() - BOTTOM_PAD - btn_h
-        for b in buttons:
-            b.move(b.x(), btn_y)
-        if bodies:
-            body = bodies[0]
-            body.resize(body.width(), max(40, btn_y - body.y() - BODY_GAP))
-
-    def _grow_right_panels(self):
-        """把右栏两个框上下加大，底边与左栏最下面一行齐平。
-
-        原先两框底下空着 171px——窗口是固定高度，右栏却没占满。
-        多出来的高度两框平分（保持它们原本的大小差）。
-        """
-        g1 = getattr(self, 'statement_group', None)      # 案件申请陈述
-        g2 = getattr(self, 'material_group', None)       # 目前提供的材料分类
-        if g1 is None or g2 is None:
-            return
-
-        # 左栏最下面一行的底边。用 isHidden() 而不是 isVisible()——本方法在
-        # __init__ 里跑，此时窗口还没 show()，isVisible() 对所有子控件都是 False。
-        # isHidden() 只反映是否被显式 hide 过，正好用来排除默认不显示的证人行。
-        left = [c for c in self.children()
-                if isinstance(c, QWidget) and c is not self and not c.isHidden()
-                and c.geometry().x() < 478 and c.geometry().y() >= 40]
-        if not left:
-            return
-        target = max(c.geometry().y() + c.geometry().height() for c in left)
-
-        r1, r2 = g1.geometry(), g2.geometry()
-        gap = r2.y() - (r1.y() + r1.height())
-        extra = target - (r2.y() + r2.height())
-        if extra <= 0:
-            return
-
-        h1 = r1.height() + extra // 2
-        h2 = r2.height() + (extra - extra // 2)
-        g1.resize(r1.width(), h1)
-        g2.move(r2.x(), r1.y() + h1 + gap)
-        g2.resize(r2.width(), h2)
-
-        self._fit_group_content(g1)
-        self._fit_group_content(g2)
-
-    def _move_witness_row_up(self):
-        """把「证人编号 / 添加证人」从左侧栏底部移到「单位性质」那一行，并改为常显。
-
-        原先它们贴在左栏最底部、且只在选中证人角色时才出现；现在并到单位性质
-        右边，任何时候都在——不必先切角色才能切换/新增证人。
-        为腾出位置，单位性质下拉从 360 缩到 100。
-        """
-        combo = getattr(self, 'unit_type_combo', None)     # 单位性质下拉
-        wlab = getattr(self, 'witness_label', None)
-        wcombo = getattr(self, 'witness_combo', None)
-        wbtn = getattr(self, 'add_witness_btn', None)
-        if any(x is None for x in (combo, wlab, wcombo, wbtn)):
-            return
-
-        row_y = combo.y()
-        C_W, LAB_W, WC_W, BTN_W = 100, 60, 110, 68
-        combo.resize(C_W, combo.height())
-
-        x = combo.x() + combo.width() + 8
-        wlab.move(x, row_y + 2)
-        wlab.resize(LAB_W, wlab.height())
-        x += LAB_W + 6
-        wcombo.move(x, row_y)
-        wcombo.resize(WC_W, wcombo.height())
-        x += WC_W + 6
-        wbtn.move(x, row_y)
-        wbtn.resize(BTN_W, wbtn.height())
-
-        for w in (wlab, wcombo, wbtn):
-            w.show()
-
     def _refresh_evidence_list(self, *_ignored):
         """按当前的 拟用条例 / 工亡案件 / 个人案件 重算材料清单。
 
@@ -2181,45 +1648,16 @@ class MainWindow(QWidget, Ui_Form):
                                  unit_type)
         self.material_list.apply_evidence_list(items)
 
-    def _align_role_radios(self):
-        """把「家属」抬到与本人/证人/法人同一行，四个角色排成一行。
-
-        原先家属独占第二行、还缩进在最左，看着参差。右侧空间随「谈话笔录」
-        下移而空出，正好接在法人之后（沿用同样的 75px 间距）。
-        """
-        names = ('radioButton', 'radioButton_2', 'radioButton_3', 'radioButton_4')
-        radios = [getattr(self, n, None) for n in names]
-        if any(r is None for r in radios):
-            return
-
-        pitch = radios[1].x() - radios[0].x()             # 现成的间距，不写死
-        radios[3].move(radios[2].x() + pitch, radios[0].y())
-
     # ========================================================================
     # 待办事项看板：文书送达流程（个人申请工伤案）
     # ========================================================================
 
     def _install_todo_kanban(self):
-        """在顶栏(28px)右侧放一个「待办事项(N)」菜单按钮，点击才展开下拉看板；
-        收起时不占用主界面空间；60s 定时按“今天”重算各案件节点/剩余天数。"""
-        win_w = self.width() or 870
-        # 顶栏右侧菜单按钮
-        self.todo_btn = QPushButton("待办事项(0)", self)
-        bw, bh = 128, 24
-        self.todo_btn.setGeometry(win_w - bw - 6, 2, bw, bh)
-        self.todo_btn.setStyleSheet(
-            "QPushButton{background:#eef6ee;border:1px solid #27ae60;border-radius:4px;"
-            "color:#1d6b1d;font-weight:bold;}"
-            "QPushButton:hover{background:#27ae60;color:#fff;}"
-        )
-        self.todo_btn.setCursor(Qt.PointingHandCursor)
-        self.todo_btn.setToolTip("展开/收起文书送达待办事项")
-        self.todo_btn.clicked.connect(self._toggle_todo_panel)
-        # 下拉看板（默认收起）
-        self.todo_board = TodoBoard(self)
-        self.todo_board.setGeometry(6, 32, win_w - 12, 240)
-        self.todo_board.taskClicked.connect(self._on_board_task_click)
-        self.todo_board.hide()
+        """待办看板的定时刷新：每小时按“今天”重算各案件节点/剩余天数。
+
+        按钮与看板控件本身（todo_btn / todo_board）由 MainWindowUI 建好并摆位，
+        它们的信号在 _connect_signals() 里接；这里只管定时器与首次刷新。
+        """
         self._todo_open = False
         # 定时刷新（任务文字/倒计时/到期流转）—— 每小时一次
         self._todo_timer = QTimer(self)
@@ -3076,7 +2514,8 @@ class MainWindow(QWidget, Ui_Form):
         role = self.get_current_role_type()
         print(f"🔄 角色切换: {role}")
         # 共享“身份”输入行的标签/提示随角色变化（家属这一栏填的是与死者关系）
-        # 标签槽是固定宽度（_compact_identity_row 摆的），所以不再按文本长度调宽度，
+        # 标签槽是固定宽度（见 ui_main_build._SIZES 里的 identity_label 44px），
+        # 所以不再按文本长度调宽度，
         # 否则切到长标签的角色会把左边的岗位输入框压住。
         if hasattr(self, 'identity_label'):
             self.identity_label.setText(
@@ -3304,22 +2743,6 @@ class MainWindow(QWidget, Ui_Form):
 
         print(f"✅ 解析结果: 审查结果长度={len(result['审查结果'])}, 问题数量={len(result['缺失问题'])}")
         return result
-
-    def _reconnect_approval_button(self):
-        """重新连接案件审批表按钮 (pushButton_11)"""
-        try:
-            # 断开所有现有连接
-            self.pushButton_11.clicked.disconnect()
-            print("🔌 已断开 pushButton_11 的旧连接")
-        except:
-            pass  # 如果没有连接，忽略
-
-        # 连接到 approve() 方法
-        self.pushButton_11.clicked.connect(self.approve)
-        print("✅ 案件审批表按钮 (pushButton_11) 已连接到 approve()")
-
-        # 可选：确认按钮文本
-        print(f"📝 按钮文本: '{self.pushButton_11.text()}'")
 
     def on_pushButton_12_clicked(self):
         """谈话通知书按钮点击事件"""
@@ -3668,233 +3091,6 @@ class MainWindow(QWidget, Ui_Form):
             # 清理标志
             if hasattr(self, '_is_handling_ai_result'):
                 delattr(self, '_is_handling_ai_result')
-
-    def _setup_radio_connections(self):
-        """设置单选按钮信号连接（简化版）"""
-        # 断开现有连接（如果有）
-        try:
-            self.radioButton.clicked.disconnect()
-            self.radioButton_2.clicked.disconnect()
-            self.radioButton_3.clicked.disconnect()
-            if hasattr(self, 'radioButton_4'):
-                self.radioButton_4.clicked.disconnect()
-        except:
-            pass
-
-        # 重新连接
-        self.radioButton.clicked.connect(self.clear_role_fields)
-        self.radioButton_2.clicked.connect(self.clear_role_fields)
-        self.radioButton_3.clicked.connect(self.clear_role_fields)
-        if hasattr(self, 'radioButton_4'):
-            self.radioButton_4.clicked.connect(self.clear_role_fields)
-        print("✅ 单选按钮信号重新连接")
-
-    def _setup_api_config_ui(self):
-        """在窗口顶部创建折叠配置栏，并下移所有现有控件；右侧增加辅助面板"""
-        TOP_BAR_H = 28          # 顶部小横条高度
-        RIGHT_PANEL_X = 478     # 右侧面板起始 x
-        RIGHT_PANEL_W = 382     # 右侧面板宽度
-
-        # --- 1. 调整窗口大小（左侧 470 + 右侧 400 = 870，加高以容纳日期组） ---
-        WIN_W, WIN_H = 870, 850
-        self.setMinimumSize(WIN_W, WIN_H)
-        self.setMaximumSize(WIN_W, WIN_H)
-        self.resize(WIN_W, WIN_H)
-
-        # --- 2. 下移所有现有控件（只挪一个薄顶栏的空间） ---
-        for child in self.children():
-            if isinstance(child, QWidget) and child is not self:
-                try:
-                    geo = child.geometry()
-                    child.setGeometry(geo.x(), geo.y() + TOP_BAR_H,
-                                      geo.width(), geo.height())
-                except Exception:
-                    pass
-
-        # ============================================================
-        # 3. 顶部小横条（始终可见）：⚙ 配置 + 状态
-        # ============================================================
-        self.top_bar = QLabel(self)
-        self.top_bar.setGeometry(0, 0, WIN_W, TOP_BAR_H)
-        self.top_bar.setStyleSheet(
-            "background-color: #e8e8e8; border-bottom: 1px solid #ccc;"
-        )
-
-        # 齿轮按钮：展开/收起用户配置
-        self.config_toggle_btn = QPushButton("⚙", self)
-        self.config_toggle_btn.setGeometry(4, 2, 28, 24)
-        self.config_toggle_btn.setToolTip("显示/隐藏用户配置")
-        self.config_toggle_btn.setStyleSheet(
-            "QPushButton { background: transparent; border: none; font-size: 14px; }"
-            "QPushButton:hover { background-color: #d0d0d0; border-radius: 3px; }"
-        )
-        self.config_toggle_btn.clicked.connect(self._toggle_config_panel)
-
-        # 顶部状态文字
-        self.top_status_label = QLabel("", self)
-        self.top_status_label.setGeometry(37, 4, 430, 20)
-        self.top_status_label.setStyleSheet("color: #888; background: transparent; border: none;")
-
-        # ============================================================
-        # 4. 用户配置下拉面板（风格同待办看板下拉；输入自动保存）
-        # ============================================================
-        self.api_group = QFrame(self)
-        self.api_group.setObjectName("apiPanel")
-        self.api_group.setAttribute(Qt.WA_StyledBackground, True)  # 确保不透明背景生效
-        self.api_group.setStyleSheet(
-            "QFrame#apiPanel{background:#ffffff;border:1px solid #b8d0b8;border-radius:4px;}"
-        )
-        # 与待办看板一致：横跨整个主界面宽度，浮于其余控件之上
-        self.api_group.setGeometry(6, TOP_BAR_H + 2,
-                                   (self.width() or 870) - 12, 150)
-        self.api_group.hide()  # 默认隐藏
-
-        panel_v = QVBoxLayout(self.api_group)
-        panel_v.setContentsMargins(12, 10, 12, 10)
-        panel_v.setSpacing(6)
-
-        head = QLabel("用户配置（修改后自动保存）", self.api_group)
-        head.setStyleSheet("color:#2c5f2d;font-weight:bold;background:transparent;")
-        panel_v.addWidget(head)
-
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("用户：", self.api_group))
-        self.api_user_combo = QComboBox(self.api_group)
-        self.api_user_combo.setEditable(True)
-        self.api_user_combo.setPlaceholderText("输入用户名")
-        self.api_user_combo.currentTextChanged.connect(self._on_user_combo_changed)
-        row1.addWidget(self.api_user_combo, 1)
-        panel_v.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("密钥：", self.api_group))
-        self.api_key_input = PasswordLineEdit(self.api_group)
-        self.api_key_input.setPlaceholderText("输入API密钥")
-        row2.addWidget(self.api_key_input, 1)
-        panel_v.addLayout(row2)
-
-        hint = QLabel("输入后自动保存，下次启动自动使用；仅在你修改输入时更新。", self.api_group)
-        hint.setStyleSheet("color:#888;font-size:9pt;background:transparent;")
-        panel_v.addWidget(hint)
-
-        # 编辑完成即自动保存
-        try:
-            self.api_user_combo.lineEdit().editingFinished.connect(self._on_api_edited)
-        except Exception:
-            pass
-        self.api_key_input.editingFinished.connect(self._on_api_edited)
-
-        # ============================================================
-        # 5. 右侧面板：案件申请陈述（上）
-        # ============================================================
-        STATEMENT_H = 350
-        # 注意：「案件申请陈述」这一栏已从数据链路上断开——框里填什么都不再进入
-        # 案件数据，也不再回填。受伤经过改从数据模型的「受伤经过」取
-        # （见 _collect_review_data / _apply_case_object）。界面暂时保留待重新设计。
-        self.statement_group = QGroupBox("案件申请陈述", self)
-        self.statement_group.setGeometry(RIGHT_PANEL_X, TOP_BAR_H + 3,
-                                         RIGHT_PANEL_W, STATEMENT_H)
-        self.statement_group.setFont(QFont("微软雅黑", 9))
-
-        self.statement_edit = QTextEdit(self.statement_group)
-        self.statement_edit.setGeometry(8, 18, RIGHT_PANEL_W - 16, STATEMENT_H - 50)
-        self.statement_edit.setPlaceholderText("在此输入案件申请陈述...")
-        self.statement_edit.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #ccc;
-                border-radius: 2px;
-                background-color: #fafafa;
-                font-size: 9pt;
-            }
-            QTextEdit:focus {
-                border-color: #3498db;
-                background-color: #fff;
-            }
-        """)
-
-        # 按钮：手动定位，不用 layout（避免和 QGroupBox 冲突）
-        btn_y = STATEMENT_H - 28
-        stmt_copy_btn = QPushButton("复制", self.statement_group)
-        stmt_copy_btn.setGeometry(8, btn_y, 45, 23)
-        stmt_copy_btn.clicked.connect(lambda: self._copy_statement())
-
-        stmt_clear_btn = QPushButton("清空", self.statement_group)
-        stmt_clear_btn.setGeometry(58, btn_y, 45, 23)
-        stmt_clear_btn.clicked.connect(lambda: self.statement_edit.clear())
-
-        # ============================================================
-        # 6. 右侧面板：目前提供的材料分类（下）
-        # ============================================================
-        MATERIAL_H = 235
-        material_top = TOP_BAR_H + STATEMENT_H + 10
-        self.material_group = QGroupBox("目前提供的材料分类", self)
-        self.material_group.setGeometry(RIGHT_PANEL_X, material_top,
-                                        RIGHT_PANEL_W, MATERIAL_H)
-        self.material_group.setFont(QFont("微软雅黑", 9))
-
-        # 用 MaterialListWidget 替换原来的 QTextEdit
-        self.material_list = MaterialListWidget(self.material_group)
-        self.material_list.setGeometry(8, 18, RIGHT_PANEL_W - 16, MATERIAL_H - 50)
-
-        # 按钮：手动定位
-        mat_btn_y = MATERIAL_H - 28
-        mat_copy_btn = QPushButton("复制", self.material_group)
-        mat_copy_btn.setGeometry(8, mat_btn_y, 45, 23)
-        mat_copy_btn.clicked.connect(lambda: self._copy_material())
-
-        mat_clear_btn = QPushButton("清空", self.material_group)
-        mat_clear_btn.setGeometry(58, mat_btn_y, 45, 23)
-        mat_clear_btn.clicked.connect(lambda: self.material_list.clear())
-
-        mat_add_btn = QPushButton("新增", self.material_group)
-        mat_add_btn.setGeometry(108, mat_btn_y, 45, 23)
-        mat_add_btn.clicked.connect(lambda: self.material_list.add_row())
-
-        # ============================================================
-        # 7. 左栏：申请 / 受理 / 就诊 时间
-        # ============================================================
-        # 四个字段两两并排：申请｜受理 一行，受伤｜就诊 一行（原为四行）。
-        # 不再套 GroupBox（原先外面有个「申请/受理/受伤/就诊时间」的框），
-        # 四个字段直接挂在主窗口上，坐标与表单其它行对齐（标签 x=11，右缘 441）。
-        _LBL_W, _IN_W = 60, 142          # 标签 5 字固定 60；两列输入框平分余宽
-        _C1_LBL, _C1_IN = 11, 77         # 左列
-        _C2_LBL, _C2_IN = 233, 299       # 右列
-        _ROW1_LBL, _ROW1_IN = 685, 683   # 第一行
-        _ROW2_LBL, _ROW2_IN = 711, 709   # 第二行
-
-        self.lbl_apply = QLabel("申请时间：", self)
-        self.lbl_apply.setGeometry(_C1_LBL, _ROW1_LBL, _LBL_W, 20)
-
-        self.apply_time_edit = QLineEdit(self)
-        self.apply_time_edit.setGeometry(_C1_IN, _ROW1_IN, _IN_W, 22)
-        self.apply_time_edit.setToolTip("输入8位日期如20260816；留空则使用系统当前日期")
-        self.apply_time_edit.editingFinished.connect(self._save_date_inputs)
-
-        self.lbl_accept = QLabel("受理时间：", self)
-        self.lbl_accept.setGeometry(_C2_LBL, _ROW1_LBL, _LBL_W, 20)
-
-        self.accept_time_edit = QLineEdit(self)
-        self.accept_time_edit.setGeometry(_C2_IN, _ROW1_IN, _IN_W, 22)
-        self.accept_time_edit.setToolTip("输入8位日期如20260816；留空则使用系统当前日期")
-        self.accept_time_edit.editingFinished.connect(self._save_date_inputs)
-
-        self.lbl_injury = QLabel("受伤时间：", self)
-        self.lbl_injury.setGeometry(_C1_LBL, _ROW2_LBL, _LBL_W, 20)
-
-        self.injury_time_edit = QLineEdit(self)
-        self.injury_time_edit.setGeometry(_C1_IN, _ROW2_IN, _IN_W, 22)
-        self.injury_time_edit.setToolTip("年月日时分，如 202609051105；留空则不填")
-        self.injury_time_edit.editingFinished.connect(self._save_date_inputs)
-
-        self.lbl_visit = QLabel("就诊时间：", self)
-        self.lbl_visit.setGeometry(_C2_LBL, _ROW2_LBL, _LBL_W, 20)
-
-        self.visit_time_edit = QLineEdit(self)
-        self.visit_time_edit.setGeometry(_C2_IN, _ROW2_IN, _IN_W, 22)
-        self.visit_time_edit.setToolTip("年月日时分，如 202609051105；留空则不填")
-        self.visit_time_edit.editingFinished.connect(self._save_date_inputs)
-
-        print("✅ API配置UI已创建")
 
     def _resolve_date_input(self, raw_value: str) -> str:
         """把输入框内容解析为日期字符串；为空时返回系统当前日期（用于 申请/受理时间）"""
@@ -4460,7 +3656,8 @@ class MainWindow(QWidget, Ui_Form):
             font = QFont(ui_settings.font_family, ui_settings.font_size)
             self.setFont(font)
 
-            # 注意：窗口大小由 _setup_api_config_ui 固定为 870x740，此处不再覆盖
+            # 注意：窗口大小由 MainWindowUI._apply_window_size 固定为 870×850，
+            # 此处不再覆盖
         except Exception as e:
             logger.warning(f"⚠️ 应用UI设置失败: {e}")
 
@@ -4561,7 +3758,8 @@ class MainWindow(QWidget, Ui_Form):
         if role == "本人":
             self.lineEdit_2.clear()
 
-        # 多证人：证人编号行常显（见 _move_witness_row_up），不再随角色隐藏。
+        # 多证人：证人编号行常显（见 ui_main_build._create_witness_widgets），
+        # 不再随角色隐藏。
         # 切到证人时加载当前证人；切走时先把表单写回当前证人。
         if role == "证人":
             self._show_witness_ui()
@@ -4576,27 +3774,8 @@ class MainWindow(QWidget, Ui_Form):
         for key in [k for k in list(self._template_dict.keys()) if k.startswith(role)]:
             self._template_dict.pop(key, None)
         self.var_manager.clear_cache()
-
-    # ========================================================================
-    # 多证人管理
-    # ========================================================================
-
-    def _setup_witness_ui(self):
-        """创建证人编号下拉框与「添加证人」按钮（代码创建，放在左栏底部空位）"""
-        self.witness_label = QLabel("证人编号：", self)
-        self.witness_label.setObjectName("witness_label")
-        self.witness_label.setGeometry(70, 765, 70, 20)
-
-        self.witness_combo = QComboBox(self)
-        self.witness_combo.setObjectName("witness_combo")
-        self.witness_combo.setGeometry(140, 763, 180, 24)
-        self.witness_combo.currentIndexChanged.connect(self._on_witness_selected)
-
-        self.add_witness_btn = QPushButton("添加证人", self)
-        self.add_witness_btn.setObjectName("add_witness_btn")
-        self.add_witness_btn.setGeometry(330, 763, 80, 24)
-        self.add_witness_btn.clicked.connect(self._add_witness)
-        # 常显（不再随角色隐藏），位置由 _move_witness_row_up() 摆到单位性质那一行
+        # 常显（不再随角色隐藏），位置由 ui_main_build._row_unit_witness() 摆在
+        # 单位性质那一行
 
     def _show_witness_ui(self):
         """切换到证人角色时显示下拉框，并加载当前/首位证人"""
