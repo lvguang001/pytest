@@ -29,8 +29,7 @@ import documents
 import transcripts
 from services import (FileService, DataService, TemplateVariableManager,
                       CaseDataModel, PERSON_BASE_FIELDS, person_flat_key,
-                      witness_seq_label, date_now, time_now, timestamp_now,
-                      format_compact_time)
+                      witness_seq_label, date_now, time_now, timestamp_now)
 from ai_service import (AIService, AIWorker, TranscriptFromTemplateWorker,
                          parse_ai_result)
 from case_classifier import (
@@ -86,18 +85,6 @@ ROLE_TALK = {
         'docx_data': '_build_family_template_data',
     },
 }
-
-
-def format_compact_time(value: str) -> str:
-    """把受伤/就诊时间的紧凑格式 YYYYMMDDHHMM 变成「2026年07月20日16时20分」。
-
-    长度不是 12 位、或含非数字时原样返回（不猜、不截断）；空值返回空串。
-    月/日/时/分补零，与 _resolve_date_input 处理 申请/受理时间 的口径一致。
-    """
-    s = str(value or '').strip()
-    if len(s) != 12 or not s.isdigit():
-        return s
-    return (f"{s[0:4]}年{s[4:6]}月{s[6:8]}日{s[8:10]}时{s[10:12]}分")
 
 
 # ============================================================================
@@ -654,46 +641,17 @@ class MainWindow(MainWindowUI):
     # 单测（见 tests/test_case_store.py）。这里留一层薄封装，把 self.BASE_PATH 绑上，
     # 免得 40 多处调用点全要改成 case_store.xxx(self.BASE_PATH, ...)。
 
-    def _legacy_cases_path(self) -> str:
-        return case_store.legacy_cases_path(self.BASE_PATH)
-
-    @staticmethod
-    def _safe_case_dirname(case_id):
-        return case_store.safe_case_dirname(case_id)
-
-    @staticmethod
-    def _year_for_case(case_id):
-        return case_store.year_for_case(case_id)
-
     def _locate_case_dir(self, case_id: str) -> str:
         return case_store.locate_case_dir(self.BASE_PATH, case_id)
 
     def _case_dir(self, case_id: str) -> str:
         return case_store.case_dir(self.BASE_PATH, case_id)
 
-    def _case_file(self, case_id: str) -> str:
-        return case_store.case_file(self.BASE_PATH, case_id)
-
-    def _iter_case_files(self):
-        return case_store.iter_case_files(self.BASE_PATH)
-
     def _load_cases_data(self) -> Dict[str, Any]:
         return case_store.load_all(self.BASE_PATH)
 
-    def _write_case_file(self, case_id: str, block: Dict[str, Any]) -> str:
-        return case_store.write_case(self.BASE_PATH, case_id, block)
-
-    def _drop_case_files_not_in(self, keep_ids) -> None:
-        return case_store.drop_case_files_not_in(self.BASE_PATH, keep_ids)
-
-    def _daily_snapshot(self, packed: Dict[str, Any]) -> None:
-        return case_store.daily_snapshot(self.BASE_PATH, packed)
-
     def _save_cases_data(self, cases: Dict[str, Any]) -> bool:
         return case_store.save_all(self.BASE_PATH, cases)
-
-    def _migrate_legacy_cases_file(self) -> None:
-        return case_store.migrate_legacy_file(self.BASE_PATH)
 
     def _update_case_field(self, case_number: str, **fields) -> bool:
         return case_store.update_case_field(self.BASE_PATH, case_number, **fields)
@@ -2610,7 +2568,6 @@ class MainWindow(MainWindowUI):
         new_item = self.company_pane.currentText().strip()
         if new_item and new_item not in self.items_list1:
             self.items_list1 = self.file_service.save_to_excel(
-                "",
                 '用人单位汇总.xlsx',
                 '用人单位汇总',
                 new_item,
@@ -2624,7 +2581,6 @@ class MainWindow(MainWindowUI):
         new_item = self.construction_company.currentText().strip()
         if new_item and new_item not in self.items_list:
             self.items_list = self.file_service.save_to_excel(
-                "",
                 '用工单位汇总.xlsx',
                 '用工单位汇总',
                 new_item,
@@ -2638,7 +2594,6 @@ class MainWindow(MainWindowUI):
         new_item = self.construction_plant.currentText().strip()
         if new_item and new_item not in self.items_list2:
             self.items_list2 = self.file_service.save_to_excel(
-                "",  # 空字符串
                 '工地名称汇总.xlsx',
                 '工地名称汇总',
                 new_item,
@@ -2953,7 +2908,6 @@ class MainWindow(MainWindowUI):
                 all_text,
                 case_id=case_number,
                 regulation_text=regulation,
-                regulation_desc=reg_desc,
                 regulation_elements=reg_elements,
             )
             if not analysis:

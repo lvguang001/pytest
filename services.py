@@ -222,7 +222,7 @@ class FileService:
                 return path
         return None
 
-    def save_to_excel(self, template_path, excel_filename, column_name, new_item, existing_items):
+    def save_to_excel(self, excel_filename, column_name, new_item, existing_items):
         """保存到Excel - 使用文书模板目录"""
         from path_utils import path_utils
         excel_path = path_utils.get_document_template_path(excel_filename)

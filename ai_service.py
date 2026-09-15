@@ -222,7 +222,6 @@ class AIService:
     def analyze_approval_transcripts(self, transcripts_text: str,
                                      case_id: str = "",
                                      regulation_text: str = "",
-                                     regulation_desc: str = "",
                                      regulation_elements=None):
         """
         AI 分析全部谈话笔录（本人/证人/法人）→ 判断认定/不予认定偏向。
