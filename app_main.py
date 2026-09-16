@@ -34,8 +34,8 @@ from ai_service import (AIService, AIWorker, TranscriptFromTemplateWorker,
 from case_classifier import (
     CaseClassifier, REGULATION_OPTIONS,
     UNIT_TYPES, UNIT_TYPE_APPELLATION, DEFAULT_UNIT_TYPE, DEFAULT_IDENTITY,
-    compose_evidence, regulation_elements, regulation_full_to_short,
-    regulation_short_to_full, regulation_full_for_unit,
+    compose_evidence, compose_checks, regulation_elements,
+    regulation_full_to_short, regulation_short_to_full, regulation_full_for_unit,
     person_affiliation, notice_basis_sentence,
 )
 from config_service import ConfigService
@@ -795,6 +795,10 @@ class MainWindow(MainWindowUI):
                                  self.death_case_checkbox.isChecked(),
                                  self.personal_application_checkbox.isChecked(),
                                  unit_type)
+        # 核实要点（不是材料，是必须问清的事实）也放进这个面板，都算「必要」。
+        # 面板实际上就是「这个案子要备什么、要核什么」的清单；
+        # 渲染提示词时它走 {{核实要点}}，不会混进 {{已提供材料}}（见 transcripts）。
+        items += [(c, True) for c in compose_checks(short)]
         self.material_list.apply_evidence_list(items)
 
     # ========================================================================
@@ -1448,6 +1452,10 @@ class MainWindow(MainWindowUI):
             # 证人/法人：恢复显示本人证据，不显示证人/法人证据
             if hasattr(self, 'material_list'):
                 self.material_list.set_materials(self.data_model.investigation.get('本人材料', []))
+
+        # set_materials 会清空整个面板，上面按条例算出来的那部分（该收的材料、
+        # 必须核实的要点）也一起没了 —— 照载入案件的路径补回来
+        self._refresh_evidence_list()
 
         self._prev_injured_worker = current_worker
 

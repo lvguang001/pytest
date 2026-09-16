@@ -16,6 +16,8 @@ from PyQt5.QtWidgets import (
     QCheckBox, QLineEdit,
 )
 
+from case_classifier import evidence_key
+
 
 class MaterialListWidget(QWidget):
     """替代原有 QTextEdit 的材料管理组件。
@@ -152,9 +154,15 @@ class MaterialListWidget(QWidget):
     def apply_evidence_list(self, items):
         """按证据清单重建「自动生成」的行；已勾选状态按名称沿用。
 
-        案件自带/手工添加的行不动，同名项也不重复添加。
+        案件自带/手工添加的行不动，同一份证据也不重复添加。
+
+        **判重和「沿用勾选状态」都走 `evidence_key`（认别名），不是精确名字**：
+        面板上一半的行是按条例算出来的「该收项」，一半是案卷里存的「实收项」，
+        两边靠名字联结。案卷里录的是「身份证复印件」、条例算的若是「身份证」，
+        这种叫法一岔开，同一份东西就会被当成两样、列成两条。
         """
-        kept_state = {r["_name_edit"].text(): (r["_cb"].isChecked(), r["_note"].text())
+        kept_state = {evidence_key(r["_name_edit"].text()):
+                      (r["_cb"].isChecked(), r["_note"].text())
                       for r in self._rows}
 
         for r in [r for r in self._rows if r.get("_generated")]:
@@ -163,12 +171,14 @@ class MaterialListWidget(QWidget):
 
         # 必须在删掉旧的自动行之后再算——否则刚被删掉的名字仍算「已存在」，
         # 新的清单里同名项会被跳过，永远加不回来（切到工亡时死亡证明就是这样丢的）
-        existing = {r["_name_edit"].text() for r in self._rows}
+        existing = {evidence_key(r["_name_edit"].text()) for r in self._rows}
 
         for name, required in items:
-            if name in existing:
+            key = evidence_key(name)
+            if key in existing:
                 continue
-            provided, notes = kept_state.get(name, (False, ""))
+            # 换条例/改名字（身份证 → 身份证复印件）后，勾选状态照样沿用
+            provided, notes = kept_state.get(key, (False, ""))
             self.add_row(name, provided, notes, required=required, generated=True)
         self._on_changed()
 

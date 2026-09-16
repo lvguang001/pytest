@@ -178,3 +178,53 @@ def test_saving_the_form_keeps_existing_extended_fields(fresh_window):
     assert again.get("service_flow") == {"phase": "ask"}, "service_flow 被冲掉了"
     assert again.get("conclusion") == "予以认定", "conclusion 被冲掉了"
     assert again["name"] == "李四"
+
+
+def test_loading_a_case_does_not_duplicate_evidence(fresh_window):
+    """★ 载入案卷后，面板上不能同时出现「身份证复印件」和「身份证」。
+
+    面板上一半的行是「按条例算出来的该收项」，一半是「案卷里存的实收项」，
+    两边靠名字联结（见 material_list.apply_evidence_list）。
+    案卷里你录的是「身份证复印件」、条例算的若是「身份证」，同一份东西就会列成两条。
+    """
+    from case_classifier import evidence_key
+
+    w = fresh_window
+    w._apply_case_object({
+        "case_id": "C-dup", "name": "莫言", "unit_type": "企业",
+        "proposed_article": "第十四条第（一）项",
+        # 故意用**旧叫法**：老案卷里存的就是「身份证」，而条例算出来的现在是
+        # 「身份证复印件」——只有走别名才认得出是同一件。名字已对齐时靠精确比对
+        # 也能过，所以这条用例必须用对不上的名字，否则测不到别名那层。
+        "materials": [{"name": "身份证", "notes": ""},
+                      {"name": "医院诊断证明书", "notes": "右足跖骨骨折"}]})
+
+    mats = w.material_list.get_materials()
+    names = [m["name"] for m in mats]
+    keys = [evidence_key(n) for n in names]
+    assert len(keys) == len(set(keys)), "同一份证据列了两条：%s" % names
+    assert not ("身份证" in names and "身份证复印件" in names), \
+        "条例又另补了一条「身份证复印件」——没认出案卷里的「身份证」"
+
+    # 案卷里那两条原样留着（连备注），不因为条例那边换了叫法就被覆盖
+    kept = {m["name"]: m for m in mats}
+    assert kept["身份证"]["provided"] is True
+    assert kept["医院诊断证明书"]["notes"] == "右足跖骨骨折"
+
+
+def test_the_panel_lists_the_verification_points(fresh_window):
+    """★ 材料面板里也要出现「必须核实的事实」。
+
+    那个面板实际上就是「这个案子要备什么、要核什么」的清单——
+    条例（二）要核「准备还是收尾」，条例（六）要核「上班还是下班」。
+    """
+    from case_classifier import regulation_short_to_full
+
+    w = fresh_window
+    w.comboBox.setCurrentIndex(
+        w.comboBox.findText(regulation_short_to_full("第十四条第（六）项")))
+    names = [m["name"] for m in w.material_list.get_materials()]
+    assert "是上班途中还是下班途中？" in names
+    assert "是否参加工伤保险？" in names
+    assert "是否属开工前的准备（或收工后的收尾）工作？" not in names, \
+        "换了条例，上一个条例的核实点没清掉"

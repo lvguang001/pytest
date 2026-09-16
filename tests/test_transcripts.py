@@ -435,3 +435,32 @@ def test_ai_output_ending_with_a_question_keeps_everything(tmp_path):
         assert sum(1 for t in texts if t.startswith("答：")) == 3
     finally:
         os.remove(out)
+
+
+def test_checks_go_into_the_prompt_but_not_into_已提供材料():
+    """★ 核实要点进 {{核实要点}}，**不混进** {{已提供材料}}。
+
+    面板上两者是混着显示的，勾选核实点也会存进 materials ——
+    但「已提供证据材料」只该列真正的书面证据，否则 AI 会以为那是一份证据。
+    """
+    d = build_unified_template_data(_case(
+        proposed_article="第十四条第（六）项",
+        materials=[{"name": "身份证复印件", "provided": True, "notes": ""},
+                   {"name": "是上班途中还是下班途中？", "provided": True, "notes": "已问"}]))
+    assert "是上班途中还是下班途中？" in d["核实要点"]
+    assert "是否参加工伤保险？" in d["核实要点"]
+    assert "是上班途中还是下班途中？" not in d["已提供材料"]
+    assert "身份证复印件" in d["已提供材料"]
+
+
+def test_the_real_prompt_renders_the_checks_section():
+    """端到端：真实提示词里那一段要真的出来。"""
+    from prompt_manager import load_prompt, render_prompt_template
+
+    text = render_prompt_template(
+        load_prompt('self_send_to_ai'),
+        prompt_fill_data("本人", _case(proposed_article="第十四条第（二）项"), _flat({})),
+        "本人")
+    assert "【必须核实的事实】" in text
+    assert "是否属开工前的准备（或收工后的收尾）工作？" in text
+    assert "是上班途中还是下班途中？" not in text, "别的条例的核实点串进来了"

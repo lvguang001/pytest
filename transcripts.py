@@ -15,7 +15,7 @@ from docx.shared import Pt
 from docxtpl import DocxTemplate
 
 from case_classifier import (
-    DEFAULT_IDENTITY, DEFAULT_UNIT_TYPE, UNIT_TYPE_APPELLATION,
+    DEFAULT_IDENTITY, DEFAULT_UNIT_TYPE, UNIT_TYPE_APPELLATION, compose_checks,
 )
 from services import date_now, time_now
 
@@ -57,9 +57,16 @@ def build_unified_template_data(case_obj: dict, username: str = "",
     # 提示词那条「与已提供证据材料不一致的地方应追问核实」要靠它才落得实。
     # 分行列、不用顿号连成一行：材料名本身就可能带括号
     # （如「近亲属关系证明（户口簿/结婚证等）」），再套括号会分不清哪段是备注。
+    # 核实要点不是材料：面板上它和材料混在一起显示（勾选后也会存进 materials），
+    # 但 {{已提供材料}} 只该列真正的书面证据，所以按名字把它们滤掉
+    checks = compose_checks(case_obj.get('proposed_article', ''))
+    check_names = set(checks)
+
     material_lines = []
     for _m in materials:
         if not (isinstance(_m, dict) and _m.get('name') and _m.get('provided')):
+            continue
+        if _m['name'] in check_names:
             continue
         _note = str(_m.get('notes') or '').strip()
         material_lines.append(f"  · {_m['name']}（备注：{_note}）" if _note
@@ -95,6 +102,8 @@ def build_unified_template_data(case_obj: dict, username: str = "",
         '本人身份': case_obj.get('identity', DEFAULT_IDENTITY),
         '受伤经过': case_obj.get('injury_description', ''),
         '已提供材料': '\n'.join(material_lines),
+        # 必须问清的事实（不是要收的材料）——按条例算，与案卷无关
+        '核实要点': '\n'.join(f"  · {c}" for c in checks),
         '记录人': recorder,
         '申请人名称': case_obj.get('applicant_name', ''),
         '用户名': username,
