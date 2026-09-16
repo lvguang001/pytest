@@ -117,24 +117,42 @@ def test_death_case_and_personal_apply_add_their_own_items():
 # ============================================================================
 
 def test_checks_carry_the_two_the_user_asked_for():
-    """用户点名要的两条：条例（二）问「准备还是收尾」、（六）问「上班还是下班」。"""
-    assert "是否属开工前的准备（或收工后的收尾）工作？" in compose_checks("第十四条第（二）项")
+    """用户点名要的两条：（二）问「准备还是收尾」、（六）问「上班还是下班」。"""
     assert "是上班途中还是下班途中？" in compose_checks("第十四条第（六）项")
 
 
-def test_common_checks_come_last_for_every_regulation():
-    """所有案子通用的两条（参保 / 饮酒）排在最后。"""
-    for reg in REGULATION_OPTIONS:
-        checks = compose_checks(reg)
-        assert checks[-2:] == ["是否参加工伤保险？", "事发前是否饮酒？"], \
-            "%s 的通用核实要点没排在最后：%s" % (reg, checks)
+def test_mutually_exclusive_items_are_options_not_questions():
+    """★ 二选一的项在清单里是**两个选项**，写成陈述式——勾哪个就是哪个。
+
+    （提示词那边只出勾了的那条，见 test_checks_are_emitted_only_when_ticked。）
+    不能写成两条问句：那样 AI 会两条都问，「你收工后是否也需要做收尾工作？」
+    这种话就冒出来了——一个案子只可能是其中一种。
+    """
+    checks = compose_checks("第十四条第（二）项")
+    assert checks == ["开工前的准备工作", "收工后的收尾工作"]
+    assert not any(c.endswith("？") for c in checks), "选项该是陈述式，不是问句"
 
 
-def test_checks_are_phrased_as_questions():
-    """写成问句形态——面板上他列在材料中间，一眼要分得出不是材料。"""
+def test_common_checks_are_listed_per_regulation_not_auto_added():
+    """通用的两条（参保 / 饮酒）写在各个条例里，**不自动追加**。
+
+    第十四条第（一）项不列——「三工」要件本身已经够明确；
+    第十四条第（三）项也不列（用户定的，连冲突起因一起删了）。
+    """
+    assert compose_checks("第十四条第（一）项") == []
+    assert compose_checks("第十四条第（三）项") == []
+    assert compose_checks("第十四条第（二）项") == ["开工前的准备工作",
+                                                   "收工后的收尾工作"]
+    checks = compose_checks("第十五条第（二）项")
+    assert checks[-2:] == ["是否参加工伤保险？", "事发前是否饮酒？"], \
+        "第十五条第（二）项的通用核实要点没排在最后：%s" % checks
+
+
+def test_checks_are_never_blank():
+    """措辞形态不限定（有的是问句、二选一的选项是陈述式），但不能是空串。"""
     for reg in REGULATION_OPTIONS:
         for c in compose_checks(reg):
-            assert c.endswith("？"), "%s 的核实要点不是问句：%s" % (reg, c)
+            assert c.strip(), "%s 里有空的核实要点" % reg
 
 
 def test_checks_never_collide_with_evidence_names():

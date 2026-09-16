@@ -268,6 +268,25 @@ def test_render_skips_blank_lines_in_the_ai_answer(tmp_path):
         os.remove(out)
 
 
+def test_render_drops_an_empty_问_or_答_line(tmp_path):
+    """★ AI 偶发在收尾问句后补一个空的「问：」——渲染成笔录就成了最后一行空问题。
+
+    实案：条例二笔录末尾出现过孤立的「问：」。这类只有前缀、没内容的行该滤掉，
+    但正常的「问：以上笔录你是否看过…」不能误删。
+    """
+    tpl = _template_with_anchor(tmp_path / "t.docx")
+    out = render_transcript(
+        tpl, {}, "问：以上笔录你是否看过，是否和你所说的一致？\n问：\n答：",
+        str(tmp_path), "笔录")
+    try:
+        texts = _texts(out)
+        assert "问：以上笔录你是否看过，是否和你所说的一致？" in texts
+        assert "问：" not in texts, "空的「问：」该被滤掉"
+        assert not any(t.strip() in ("问：", "答：") for t in texts), "不该留空问答行"
+    finally:
+        os.remove(out)
+
+
 def test_render_returns_empty_when_anchor_is_missing(tmp_path):
     doc = Document()
     doc.add_paragraph("没有锚点的模板")
@@ -448,19 +467,56 @@ def test_checks_go_into_the_prompt_but_not_into_已提供材料():
         materials=[{"name": "身份证复印件", "provided": True, "notes": ""},
                    {"name": "是上班途中还是下班途中？", "provided": True, "notes": "已问"}]))
     assert "是上班途中还是下班途中？" in d["核实要点"]
-    assert "是否参加工伤保险？" in d["核实要点"]
+    assert "是否参加工伤保险？" not in d["核实要点"], "没勾的也发出去了"
     assert "是上班途中还是下班途中？" not in d["已提供材料"]
     assert "身份证复印件" in d["已提供材料"]
 
 
-def test_the_real_prompt_renders_the_checks_section():
-    """端到端：真实提示词里那一段要真的出来。"""
+def test_checks_are_emitted_only_when_ticked():
+    """★ 面板上勾了哪条，提示词里就出哪条。
+
+    二选一的项尤其重要：条例（二）的「开工前的准备工作 / 收工后的收尾工作」，
+    两条都发的话 AI 会先问一种、再问另一种，而案子只可能是其中一种。
+    """
+    def emitted(opened, closed):
+        d = build_unified_template_data(_case(
+            proposed_article="第十四条第（二）项",
+            materials=[{"name": "开工前的准备工作", "provided": opened},
+                       {"name": "收工后的收尾工作", "provided": closed}]))
+        return d["核实要点"]
+
+    only_open = emitted(True, False)
+    assert "开工前的准备工作" in only_open
+    assert "收工后的收尾工作" not in only_open, "没勾的那项也发出去了"
+
+    only_close = emitted(False, True)
+    assert "收工后的收尾工作" in only_close
+    assert "开工前的准备工作" not in only_close
+
+    assert emitted(False, False) == "", "一条没勾就不该出"
+
+
+def test_the_real_prompt_renders_only_the_ticked_check():
+    """端到端：真实提示词里那一段，只出勾了的那条。"""
+    from prompt_manager import load_prompt, render_prompt_template
+
+    text = render_prompt_template(
+        load_prompt('self_send_to_ai'),
+        prompt_fill_data("本人", _case(
+            proposed_article="第十四条第（二）项",
+            materials=[{"name": "开工前的准备工作", "provided": True}]), _flat({})),
+        "本人")
+    assert "【必须核实的事实】" in text
+    assert "开工前的准备工作" in text
+    assert "收工后的收尾工作" not in text, "没勾的那项也进提示词了"
+
+
+def test_the_real_prompt_omits_the_checks_section_when_nothing_is_ticked():
+    """一条都没勾 → 整段不出现（不留光杆标题）。"""
     from prompt_manager import load_prompt, render_prompt_template
 
     text = render_prompt_template(
         load_prompt('self_send_to_ai'),
         prompt_fill_data("本人", _case(proposed_article="第十四条第（二）项"), _flat({})),
         "本人")
-    assert "【必须核实的事实】" in text
-    assert "是否属开工前的准备（或收工后的收尾）工作？" in text
-    assert "是上班途中还是下班途中？" not in text, "别的条例的核实点串进来了"
+    assert "【必须核实的事实】" not in text

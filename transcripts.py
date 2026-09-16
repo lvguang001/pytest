@@ -62,6 +62,13 @@ def build_unified_template_data(case_obj: dict, username: str = "",
     checks = compose_checks(case_obj.get('proposed_article', ''))
     check_names = set(checks)
 
+    # 核实要点：**面板上勾了哪条，提示词里就出哪条**（勾 = 该情形成立）。
+    # 没勾的不列——尤其二选一的项（开工前的准备工作 / 收工后的收尾工作）：
+    # 两条都发的话 AI 会先问一种、再问另一种，而案子只可能是其中一种。
+    checked_checks = [_m['name'] for _m in materials
+                      if isinstance(_m, dict) and _m.get('provided')
+                      and _m.get('name') in check_names]
+
     material_lines = []
     for _m in materials:
         if not (isinstance(_m, dict) and _m.get('name') and _m.get('provided')):
@@ -102,8 +109,8 @@ def build_unified_template_data(case_obj: dict, username: str = "",
         '本人身份': case_obj.get('identity', DEFAULT_IDENTITY),
         '受伤经过': case_obj.get('injury_description', ''),
         '已提供材料': '\n'.join(material_lines),
-        # 必须问清的事实（不是要收的材料）——按条例算，与案卷无关
-        '核实要点': '\n'.join(f"  · {c}" for c in checks),
+        # 面板上勾了的核实要点（不是要收的材料）——勾了哪项就按哪项问
+        '核实要点': '\n'.join(f"  · {c}" for c in checked_checks),
         '记录人': recorder,
         '申请人名称': case_obj.get('applicant_name', ''),
         '用户名': username,
@@ -252,6 +259,12 @@ def render_transcript(template_path: str, template_data: dict, content: str,
 
     # ── 插入 AI 问答（插在末段之前）──
     lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    # 空问答行：AI 偶发会输出一个光秃的「问：」/「答：」（只有前缀、没内容）。
+    # 提示词要求「最后一个问题只写问：……、不写对应的答：」，AI 有时在收尾问句后
+    # 再补一个空的「问：」——渲染成笔录就成了最后一行空问题（实案见过）。滤掉。
+    lines = [ln for ln in lines
+             if not (len(ln) >= 2 and ln[:2] in ('问：', '答：', '问:', '答:')
+                     and not ln[2:].strip())]
     # 末段已经提供了最后一个「答：」，AI 再写一个就成了两个
     if tail is not None and lines and lines[-1].startswith('答：'):
         lines = lines[:-1]
