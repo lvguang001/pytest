@@ -7,7 +7,6 @@ from typing import Dict, List, Any, Optional
 from ctypes import windll, byref, create_string_buffer, c_int32, c_uint
 import pandas as pd
 from prompt_manager import render_prompt_template
-from docx import Document
 from docxtpl import DocxTemplate
 from PyQt5.Qt import *
 from PyQt5.QtCore import Qt
@@ -1063,10 +1062,13 @@ class MainWindow(MainWindowUI):
         self.transcript_worker.error.connect(self._on_transcript_error)
         self.transcript_worker.start()
 
-    def _prompt_fill_data(self, role: str, case_obj: dict) -> Dict[str, Any]:
+    def _prompt_fill_data(self, role: str, case_obj: dict,
+                          main_transcript: str = "") -> Dict[str, Any]:
         """「发给AI」提示词的填充数据（实现在 transcripts.py）
 
         证人要先确保存在一条当前证人记录——那一步有副作用，所以留在这一层。
+        `main_transcript` 是本案本人笔录正文（只有证人用得上），由调用方读好传进来
+        ——文件 IO 留在这一层，transcripts 那边保持纯函数。
         """
         witness = None
         if role == '证人':
@@ -1080,9 +1082,11 @@ class MainWindow(MainWindowUI):
             witness=witness,
             username=self._get_current_username(),
             current_period=self.get_data('当前时期', ''),
+            main_transcript=main_transcript,
         )
 
-    def _build_prompt_for_role(self, role: str, case_obj: dict) -> str:
+    def _build_prompt_for_role(self, role: str, case_obj: dict,
+                               main_transcript: str = "") -> str:
         """按角色返回发给 AI 的 txt 提示词（ROLE_TALK 定 key，统一渲染并校验残留占位符）
 
         条件块（时间核对、第（六）项问现住址）已写进各自的 txt 模板，用 `{% if %}` 控制，
@@ -1091,9 +1095,11 @@ class MainWindow(MainWindowUI):
         from prompt_manager import load_prompt
         meta = ROLE_TALK.get(role, ROLE_TALK['本人'])
         prompt = load_prompt(meta['ai_prompt'])
-        return render_prompt_template(prompt, self._prompt_fill_data(role, case_obj), role)
+        return render_prompt_template(
+            prompt, self._prompt_fill_data(role, case_obj, main_transcript), role)
 
-    def _build_prompt_or_warn(self, role: str, case_obj: dict) -> Optional[str]:
+    def _build_prompt_or_warn(self, role: str, case_obj: dict,
+                              main_transcript: str = "") -> Optional[str]:
         """拼提示词；提示词文件缺失/为空时给个明确提示，返回 None（别让程序闪退）。
 
         这个异常必须在这里兜住：调用它的是 Qt 槽函数，漏出去的异常会被 qFatal 直接中止
@@ -1101,7 +1107,7 @@ class MainWindow(MainWindowUI):
         """
         from prompt_manager import PromptError
         try:
-            return self._build_prompt_for_role(role, case_obj)
+            return self._build_prompt_for_role(role, case_obj, main_transcript)
         except PromptError as e:
             logger.error(f"❌ 无法生成{role}谈话笔录：{e}")
             QMessageBox.critical(
@@ -1112,11 +1118,20 @@ class MainWindow(MainWindowUI):
             return None
 
     def _generate_role_transcript(self, role: str):
-        """统一的谈话笔录生成入口——四个角色都走这里（数据核对确认后拼提示词 → AI 后台线程）"""
+        """统一的谈话笔录生成入口——四个角色都走这里（数据核对确认后拼提示词 → AI 后台线程）
+
+        只有证人另有一条**不调 AI** 的路（见 _generate_witness_transcript），所以它先分出去：
+        那条路在没配 API 密钥时也该能出笔录，不能被下面这道 `if not self.ai_service` 挡住。
+        """
         case_id = self.current_case_id or self.lineEdit_2.text().strip()
         if not case_id:
             self._set_status(f'无案本号，无法生成{role}笔录', 'orange')
             return
+
+        if role == '证人':
+            self._generate_witness_transcript(case_id)
+            return
+
         if not self.ai_service:
             self._set_status('未配置AI，无法生成笔录', 'orange')
             QMessageBox.warning(self, "提示", f"未配置API密钥，无法生成{role}谈话笔录。\n请在顶部⚙配置中设置API密钥。")
@@ -1129,6 +1144,46 @@ class MainWindow(MainWindowUI):
         if prompt_text is None:
             return
         self._start_transcript_generation(role, case_id, case_obj, prompt_text)
+
+    def _generate_witness_transcript(self, case_id: str):
+        """证人笔录：按「本案卷里有没有本人笔录」分两条路
+
+        - **有**本人笔录（且配了 AI）→ 把笔录正文交给 AI，让它依本人陈述与本案法律要件
+          设计提问，并对不一致处追问核实；
+        - **没有** → 不调 AI，本地拼一套固定问答（transcripts.compose_witness_qa）。
+
+        「有笔录但没配 AI」也走本地——但要说明白，别让人以为拿到的是依本人笔录生成的版本。
+        """
+        case_obj = self._load_cases_data().get(case_id)
+        if not case_obj:
+            self._set_status('未找到该案本号的案件数据', 'orange')
+            return
+        main_transcript = self._find_main_transcript(case_id)
+
+        if main_transcript and self.ai_service:
+            prompt_text = self._build_prompt_or_warn('证人', case_obj, main_transcript)
+            if prompt_text is None:
+                return
+            self._start_transcript_generation('证人', case_id, case_obj, prompt_text)
+            return
+
+        if main_transcript:
+            logger.warning("⚠️ 未配置AI，证人笔录退化成本地固定套路（本案有本人笔录）")
+            note = '未配置AI，已按固定套路生成证人笔录'
+        else:
+            note = '未找到本人笔录，已按固定套路生成证人笔录'
+
+        content = transcripts.compose_witness_qa(case_obj)
+        # keep_blank_answers：骨架里那些光杆「答：」是故意留白给现场记录的，
+        # 不能像 AI 输出那样被当成错行滤掉
+        path = self._save_transcript_to_template(
+            case_obj, content, '证人', keep_blank_answers=True)
+        if not path:
+            return
+        self._save_witnesses()  # 与 AI 那条路同口径：把证人数据持久化
+        self._ensure_service_flow_started(case_id, case_obj, '证人')
+        success, _ = self.file_service.open_document(path)
+        self._set_status(note, 'green' if success else 'orange')
 
     def _on_transcript_generated(self, role: str, case_id: str, case_obj: dict, result: dict):
         if result.get("状态") != "成功":
@@ -1175,6 +1230,29 @@ class MainWindow(MainWindowUI):
         return [os.path.join(folder, n) for n in sorted(names)
                 if n.endswith('.docx') and '本人谈话笔录' in n]
 
+    def _find_main_transcript(self, case_id: str) -> str:
+        """该案卷里**最新的一份**本人笔录，读成正文返回；没有/读不出返回空串。
+
+        证人笔录据此设计提问（有本人陈述才有「与本人陈述不一致」可核）。空串表示
+        「没有」，调用方据此走本地拼装那条路。
+
+        多份副本（(2)(3)，重复生成留下的）时取 mtime 最新的——新的才是准的。
+
+        注意别拿 `_main_transcript_candidates()` 顶替：那个读 `self.current_case_folder`
+        这个缓存（初始化是 None、F2 换数据还会被重置），且按 `"本人" in 文件名` 匹配、
+        优先返回家属笔录，语义不一样。
+        """
+        paths = self._main_transcript_files(case_id)
+        if not paths:
+            return ""
+        newest = max(paths, key=lambda p: os.path.getmtime(p))
+        text = documents.read_docx_text(newest)
+        if not text.strip():
+            # 空文件/损坏：当作「没有本人笔录」，别把空文本喂给 AI
+            logger.warning("⚠️ 本人笔录读出来是空的，按无本人笔录处理: %s", newest)
+            return ""
+        return text
+
     def _delete_main_transcripts(self, paths: List[str]) -> bool:
         """删掉旧的本人笔录；有文件删不掉（例如正被 Word 打开）就返回 False 并提示"""
         failed = []
@@ -1218,10 +1296,12 @@ class MainWindow(MainWindowUI):
             return False
         return self._delete_main_transcripts(old)
 
-    def _save_transcript_to_template(self, case_obj: dict, content: str, role: str = '本人') -> str:
+    def _save_transcript_to_template(self, case_obj: dict, content: str, role: str = '本人',
+                                     keep_blank_answers: bool = False) -> str:
         """渲染并保存该角色的谈话笔录（实现在 transcripts.py）
 
         这一层负责「选模板、定案卷目录、失败时报状态栏」；渲染本身是纯的。
+        `keep_blank_answers` 只给本地拼装的证人笔录用（留白「答：」是有意的）。
         """
         try:
             meta = ROLE_TALK.get(role, ROLE_TALK['本人'])
@@ -1240,6 +1320,7 @@ class MainWindow(MainWindowUI):
                 template_path, template_data, content,
                 out_dir=self.current_case_folder,
                 file_base=f"{subject}{label}", label=label,
+                keep_blank_answers=keep_blank_answers,
             )
         except Exception as e:
             logger.error(f"❌ 生成{role}谈话笔录失败: {e}")
@@ -2923,14 +3004,9 @@ class MainWindow(MainWindowUI):
                     continue
                 if any(k in fname for k in exclude_kw):
                     continue
-                fpath = os.path.join(case_folder, fname)
-                try:
-                    doc = Document(fpath)
-                    text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-                    if text.strip():
-                        parts.append(f"=== {fname} ===\n{text}")
-                except Exception:
-                    continue
+                text = documents.read_docx_text(os.path.join(case_folder, fname))
+                if text.strip():
+                    parts.append(f"=== {fname} ===\n{text}")
             if not parts:
                 logger.warning("⚠️ 目录下没有可用的谈话笔录")
                 return ""

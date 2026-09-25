@@ -14,7 +14,7 @@ import documents
 from documents import (
     build_notice_template_data, insert_questions_to_document,
     normalize_compact_date, notice_file_name, notice_template_name,
-    read_approval_table, tick_approval_box, unique_path,
+    read_approval_table, read_docx_text, tick_approval_box, unique_path,
 )
 
 
@@ -202,3 +202,37 @@ def test_insert_questions_reports_failure_instead_of_raising(tmp_path):
     ok, msg = insert_questions_to_document(str(tmp_path / "没有这个.docx"), ["x"])
     assert ok is False
     assert msg
+
+# ============================================================================
+# 读任意 docx 的正文
+# ============================================================================
+
+def test_read_docx_text_returns_the_paragraphs(tmp_path):
+    doc = Document()
+    for line in ("问：你好", "", "   ", "答：听清楚了"):
+        doc.add_paragraph(line)
+    path = str(tmp_path / "a.docx")
+    doc.save(path)
+    # 空段与纯空白段丢掉：笔录里到处都是空行，留着会把正文撑散
+    assert read_docx_text(path) == "\n".join(["问：你好", "答：听清楚了"])
+
+
+def test_read_docx_text_ignores_tables(tmp_path):
+    """只读段落是有意的：笔录的问答在段落里，表格是审批表那种才有的东西。"""
+    path = _docx_with_table(tmp_path / "t.docx", [["用人单位", "某公司"]])
+    assert read_docx_text(path) == ""
+
+
+def test_read_docx_text_returns_empty_for_a_broken_file(tmp_path):
+    """★ 读不出内容不抛异常，返回空串。
+
+    调用方拿它判断「本案有没有本人笔录」——一个坏文件该被当成「没有」，
+    而不是把整条生成链打断。这里用一个后缀是 .docx 的假文件模拟。
+    """
+    path = tmp_path / "坏文件.docx"
+    path.write_bytes(b"not a real docx")
+    assert read_docx_text(str(path)) == ""
+
+
+def test_read_docx_text_returns_empty_for_a_missing_file(tmp_path):
+    assert read_docx_text(str(tmp_path / "没有.docx")) == ""

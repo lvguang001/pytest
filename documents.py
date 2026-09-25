@@ -87,6 +87,25 @@ def read_approval_table(file_path: str) -> dict:
     return extracted_data
 
 
+# ============================================================================
+# 读任意 docx 的正文
+# ============================================================================
+
+def read_docx_text(file_path: str) -> str:
+    """读 docx 的**段落**正文（不含表格），每段一行、空段丢掉；读不了返回空串。
+
+    只读段落是有意的：谈话笔录的问答都在段落里，表格是审批表那种才有的东西。
+    读不出内容不抛异常——调用方（如「有没有本人笔录」的判断）要把它当成「没有」，
+    而不是让一个坏文件把整条生成链打断。
+    """
+    try:
+        doc = Document(file_path)
+    except Exception as e:
+        logger.warning("⚠️ 读取 docx 失败 %s: %s", file_path, e)
+        return ""
+    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
+
 def normalize_compact_date(value) -> str:
     """8 位数字的日期（20260720）补成「2026年07月20日」；其余原样返回。
 

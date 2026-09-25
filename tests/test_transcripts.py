@@ -14,8 +14,8 @@ import pytest
 from docx import Document
 
 from transcripts import (
-    ANCHOR_TEXT, build_unified_template_data, identity_wording_hint,
-    prompt_fill_data, render_transcript,
+    ANCHOR_TEXT, build_unified_template_data, compose_witness_qa,
+    identity_wording_hint, prompt_fill_data, render_transcript,
 )
 
 
@@ -342,6 +342,42 @@ def test_the_real_prompt_file_renders_cleanly():
         assert "：【\n" not in text, f"{reg}: 有条目只有标题没有内容"
 
 
+#: 四个角色 → 各自的提示词 txt。角色的映射在 app_main.ROLE_TALK，这里只认 key。
+ROLE_PROMPTS = {
+    "本人": "self_send_to_ai",
+    "证人": "witness_send_to_ai",
+    "法人": "legal_send_to_ai",
+    "家属": "family_send_to_ai",
+}
+
+
+@pytest.mark.parametrize("role,key", sorted(ROLE_PROMPTS.items()))
+def test_every_role_prompt_renders(role, key):
+    """四个角色的提示词都要能拼出来——**每个都要**，不能只测本人。
+
+    这条是有来历的：四份提示词里都写了时间核对块
+    `{% if 受伤时间 and 就诊时间 %}`，而 Jinja 用的是 StrictUndefined，
+    条件里引用没填的键会**直接抛 UndefinedError**（不是静默当假）。当时
+    `transcripts._common()` 只填了本人那一路，于是证人/法人/家属三种笔录
+    一生成就抛异常；而按钮的槽函数整块包在 try/except 里（见
+    app_main.on_talk_button_clicked），异常被吞掉只打印——**表现是点了没反应**。
+    原来的回归测试只 loop 了拟用条例、没 loop 角色，所以一直是绿的。
+
+    这里断言「拼得出来」而非具体措辞：措辞由提示词 txt 决定，随时会改。
+    """
+    from prompt_manager import load_prompt, render_prompt_template
+
+    witness = {"name": "李四", "id_card": "3302", "position": "工友", "identity": "职工"}
+    text = render_prompt_template(
+        load_prompt(key),
+        prompt_fill_data(role, _case(), _flat({}), witness=witness),
+        role)
+    assert text.strip()
+    assert "{{" not in text and "}}" not in text, f"{role}: 有没被替换的占位符"
+    assert "{#" not in text, f"{role}: 注释没被吃掉"
+
+
+
 def test_the_real_prompt_lists_materials_with_notes():
     """端到端确认：案卷里的备注真的进了提示词。"""
     from prompt_manager import load_prompt, render_prompt_template
@@ -520,3 +556,190 @@ def test_the_real_prompt_omits_the_checks_section_when_nothing_is_ticked():
         prompt_fill_data("本人", _case(proposed_article="第十四条第（二）项"), _flat({})),
         "本人")
     assert "【必须核实的事实】" not in text
+
+# ============================================================================
+# 证人笔录：本地拼装（案卷里没有本人笔录时走的那条路，不调 AI）
+# ============================================================================
+
+def _qa(text):
+    """把拼出来的笔录拆成 [(问, 答), ...]；末问没有答行，得到 None。
+
+    顺带当断言用：答行出现在任何问句之前就说明拼装顺序坏了。
+    """
+    pairs = []
+    for line in text.splitlines():
+        if line.startswith("问："):
+            pairs.append([line[2:], None])
+        elif line.startswith("答："):
+            assert pairs, f"答行出现在问句之前: {line!r}"
+            assert pairs[-1][1] is None, f"同一个问题出了两个答行: {line!r}"
+            pairs[-1][1] = line[2:]
+    return pairs
+
+
+def test_witness_qa_is_all_问_答_pairs():
+    pairs = _qa(compose_witness_qa(_case()))
+    assert len(pairs) >= 13
+    for q, a in pairs:
+        assert q.strip(), "有问题没写内容"
+    # 只有末问不给答行（留给被谈话人亲笔写并签名），其余每问都有答行
+    assert pairs[-1][1] is None, "末问不该有答行——那是留给被谈话人亲笔写的"
+    assert all(a is not None for _, a in pairs[:-1]), "除去末问，每问都该有答行"
+
+
+def test_witness_qa_first_and_last_questions_are_fixed():
+    """首问与末三问照样本写死——这四问在 10 份实际笔录样本里一字不差。"""
+    pairs = _qa(compose_witness_qa(_case()))
+    assert pairs[0][0] == "请介绍一下你的姓名、住址、工作单位以及从事的工作？"
+    assert [q for q, _ in pairs[-4:]] == [
+        "你应当如实回答我们的询问并协助调查，不得提供虚假证言，否则将承担法律责任，你清楚吗？",
+        "张三受伤后去了哪个医院？谁送他去的？",
+        "你还有没有需要补充？",
+        "以上记录是否和你表达的意思一致？",
+    ]
+
+
+def test_witness_qa_answers_use_the_workers_position():
+    """岗位填了就写进答句；没填时不能拼出「做……的」这种缺宾语的句子。"""
+    with_pos = _qa(compose_witness_qa(_case()))[1][1]
+    assert with_pos == "认识的，张三是在我们公司做电焊工的。"
+
+    without = _qa(compose_witness_qa(_case(position="")))[1][1]
+    assert without == "认识的，张三是在我们公司工作的。"
+
+
+@pytest.mark.parametrize("unit_type,word", [
+    ("企业", "公司"),                  # 默认：企业说「公司」
+    ("事业单位", "单位"),              # 幼儿园/学校/医院说「单位」
+    ("机关（公务员）", "单位"),
+    ("", "单位"),                      # 没填也回退到「单位」，不会拼出错句
+])
+def test_witness_qa_uses_the_unit_appellation(unit_type, word):
+    """★ 「公司」还是「单位」随单位性质变。
+
+    样本里幼儿园案件的问句是「你们**单位**员工工作时间是怎么安排的」，
+    企业案件才是「你们**公司**…」。搞错的话笔录一眼就不对。
+    """
+    pairs = _qa(compose_witness_qa(_case(unit_type=unit_type)))
+    assert pairs[3][0].startswith(f"你们{word}员工工作时间是怎么安排的？")
+
+
+def test_witness_qa_pronoun_follows_the_workers_gender():
+    female = _qa(compose_witness_qa(_case(name="周月宵", gender="女")))
+    assert female[1][0] == "请问你认识周月宵吗？她从事什么工作？"
+    assert "她在受伤之前身体是正常的" in female[9][1]
+
+    male = _qa(compose_witness_qa(_case(gender="男")))
+    assert male[1][0] == "请问你认识张三吗？他从事什么工作？"
+
+
+def test_witness_qa_leaves_blank_answers_for_the_recorder():
+    """事实部分一律留白——那是现场记录的，不是程序编的。"""
+    pairs = _qa(compose_witness_qa(_case()))
+    by_q = {q: a for q, a in pairs}
+    assert by_q["事故发生时，你是否在现场？当时在做什么？"] == ""
+    assert by_q["请你详细陈述一下你知道的张三受伤情况或者你看到的受伤经过？"] == ""
+
+
+@pytest.mark.parametrize("article,extra,absent", [
+    ("第十四条第（六）项", "公安机关交通管理部门是否处理了此事？你是否了解责任划分情况？",
+     "你这次外出是去哪里"),
+    ("第十四条第（五）项", "张三这次外出是去哪里、办什么事？是谁安排的？",
+     "公安机关交通管理部门"),
+    ("第十四条第（一）项", None, "公安机关交通管理部门"),   # 三工要件骨架里已问到，不追加
+])
+def test_witness_qa_adds_the_articles_own_questions(article, extra, absent):
+    """按拟用条例追加该条例特有的问句；没有对应条目的条例不追加。"""
+    text = compose_witness_qa(_case(proposed_article=article))
+    assert absent not in text
+    if extra:
+        assert extra in text
+
+
+def test_witness_qa_extra_questions_come_after_the_incident_account():
+    """★ 追加的问句插在「详细陈述受伤经过」之后。
+
+    顺序有意：先把经过问完，再追该条例特有的事实。
+    """
+    pairs = _qa(compose_witness_qa(_case(proposed_article="第十四条第（六）项")))
+    questions = [q for q, _ in pairs]
+    account = questions.index("请你详细陈述一下你知道的张三受伤情况或者你看到的受伤经过？")
+    own = questions.index("公安机关交通管理部门是否处理了此事？你是否了解责任划分情况？")
+    later = questions.index("事故发生的时间，是否在正常的工作时间内？张三当时进行的工作是否是公司安排的本职工作？")
+    assert account < own < later
+
+
+def test_witness_qa_does_not_break_when_the_case_is_bare():
+    """字段大面积为空时也要拼得出完整问答，不能出现「请问你认识吗」这种断句。
+
+    单位性质没写时按全项目统一口径算「企业」（DEFAULT_UNIT_TYPE），所以说「公司」。
+    """
+    pairs = _qa(compose_witness_qa({}))
+    assert pairs[1][0] == "请问你认识受伤职工吗？他从事什么工作？"
+    assert pairs[1][1] == "认识的，受伤职工是在我们公司工作的。"
+
+
+def test_render_keeps_blank_answers_when_asked(tmp_path):
+    """★ 本地拼装那条路要保留光杆「答：」行。
+
+    render_transcript 默认会把没有内容的「答：」滤掉（那是为了滤掉 AI 偶发输出
+    的光秃行）；可本地拼装的留白是**故意**留给现场记录的，滤掉了就没地方写。
+    """
+    tpl = _template_with_anchor(tmp_path / "t.docx")
+    content = "\n".join(["问：事故发生时，你是否在现场？",
+                         "答：",
+                         "问：以上记录是否和你表达的意思一致？"])
+    kept = render_transcript(tpl, {}, content, str(tmp_path), "证人笔录",
+                             keep_blank_answers=True)
+    dropped = render_transcript(tpl, {}, content, str(tmp_path), "证人笔录")
+    try:
+        assert "答：" in _texts(kept), "留白的答行被滤掉了"
+        assert "答：" not in _texts(dropped), "默认那条路不该保留光杆答行"
+    finally:
+        os.remove(kept)
+        os.remove(dropped)
+
+
+# ============================================================================
+# 证人提示词：有/无本人笔录两个分支
+# ============================================================================
+
+def _witness_prompt(case, main_transcript=""):
+    from prompt_manager import load_prompt, render_prompt_template
+
+    return render_prompt_template(
+        load_prompt('witness_send_to_ai'),
+        prompt_fill_data("证人", case, _flat({}),
+                         witness={"name": "李四", "position": "工友", "identity": "职工"},
+                         main_transcript=main_transcript),
+        "证人")
+
+
+def test_witness_prompt_carries_the_main_transcript():
+    """★ 有本人笔录时，全文要进提示词——不然「与本人陈述不一致」那条规则是空转的。"""
+    text = _witness_prompt(_case(), main_transcript="答：我是电焊工，上的是晚班。")
+    assert "【本人笔录（被询问人本人的陈述）】" in text
+    assert "我是电焊工，上的是晚班。" in text
+    assert "与本人陈述不一致" in text
+
+
+def test_witness_prompt_omits_the_main_transcript_section_when_absent():
+    """没有本人笔录时整段不出现（不留光杆标题），并且要给出兜底说明。"""
+    text = _witness_prompt(_case())
+    assert "【本人笔录" not in text
+    assert "本案没有本人笔录可供参照" in text
+
+
+def test_witness_prompt_carries_the_elements_and_checks():
+    """证人提示词是**按法律要件**设计提问的，要件与勾了的核实要点都得在里面。"""
+    from prompt_manager import load_prompt, render_prompt_template
+
+    case = _case(proposed_article="第十四条第（六）项", materials=[
+        {"name": "是上班途中还是下班途中？", "provided": True}])
+    text = render_prompt_template(
+        load_prompt('witness_send_to_ai'),
+        prompt_fill_data("证人", case, _flat({}), witness={"name": "李四"}),
+        "证人")
+    assert "上下班途中 + 非本人主要责任" in text
+    assert "是上班途中还是下班途中？" in text
+    assert "【拟用条例与询问重点】" in text

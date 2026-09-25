@@ -4,6 +4,8 @@
 对应的验证方法：改界面之前和之后各跑一遍，输出应当完全一致。
 """
 
+import os
+
 
 def test_role_switch_updates_identity_label(fresh_window):
     """「身份」这一栏的标签随角色变；家属那一栏填的是与死者关系。"""
@@ -228,3 +230,206 @@ def test_the_panel_lists_the_verification_points(fresh_window):
     assert "是否参加工伤保险？" in names
     assert "是否属开工前的准备（或收工后的收尾）工作？" not in names, \
         "换了条例，上一个条例的核实点没清掉"
+
+
+# ============================================================================
+# 证人笔录：按「本案卷里有没有本人笔录」分两条路
+# ============================================================================
+
+def _save_a_case(w):
+    """在界面上录一个案子存盘，返回 case_id。
+
+    存完把案卷目录清干净（只留 case.json）：沙箱是整个会话共用的，而案本号是按
+    姓名算出来的——几条用例录的都是「张三」，落到同一个案卷目录，上一条用例写的
+    本人笔录会留到下一条里，用例就不独立了。
+    """
+    w.radioButton.setChecked(True)
+    w.clear_role_fields()
+    w.name_pane.setText("张三")
+    w.lineEdit_5.setText("电焊工")
+    w.lineEdit_2.clear()
+    w.current_case_id = ""
+    assert w._save_case_from_form() is True
+    folder = w._locate_case_dir(w.current_case_id)
+    if folder:
+        for name in os.listdir(folder):
+            if name != 'case.json':
+                os.remove(os.path.join(folder, name))
+    return w.current_case_id
+
+
+def _write_transcript(path, lines):
+    from docx import Document
+    doc = Document()
+    for line in lines:
+        doc.add_paragraph(line)
+    doc.save(str(path))
+    return str(path)
+
+
+def _probe(w, monkeypatch, seen, ai_service=None, save_result=''):
+    """把生成的**两条出口**都换成探针：别真调 AI、别真拿 Word 打开文件。
+
+    seen 攒到的：`ai` = 走了 AI 那条路（连带 `prompt` 发给 AI 的提示词）、
+    `content` = 本地拼出来的问答、`keep_blank_answers` = 渲染时那个开关。
+
+    `save_result` 给状态栏那几条用例用：返回空串 = 渲染失败，后面的开户与
+    状态栏就不跑了（状态栏停在「案件数据已保存」上）。
+    """
+    monkeypatch.setattr(w, 'ai_service', ai_service, raising=False)
+
+    def fake_start(role, case_id, case_obj, prompt_text):
+        seen['ai'] = True
+        seen['role'] = role
+        seen['prompt'] = prompt_text
+
+    def fake_save(case_obj, content, role='本人', keep_blank_answers=False):
+        seen['content'] = content
+        seen['keep_blank_answers'] = keep_blank_answers
+        seen['role'] = role
+        return save_result
+
+    monkeypatch.setattr(w, '_start_transcript_generation', fake_start)
+    monkeypatch.setattr(w, '_save_transcript_to_template', fake_save)
+
+
+def test_witness_transcript_without_a_main_transcript_skips_the_ai(fresh_window, monkeypatch):
+    """★ 案卷里没有本人笔录 → 本地拼装，**一个网络请求都不发**。
+
+    同时锁住另一件事：这条路必须在 `if not self.ai_service: return` **之前**。
+    这里把 ai_service 置成 None（正是没配 API 密钥时的样子），笔录照样要出得来。
+    """
+    w = fresh_window
+    _save_a_case(w)
+    seen = {}
+    _probe(w, monkeypatch, seen, ai_service=None)
+
+    w._generate_role_transcript('证人')
+
+    assert 'ai' not in seen, "没有本人笔录却去调 AI 了"
+    assert '请介绍一下你的姓名、住址、工作单位以及从事的工作？' in seen['content']
+    assert '请你详细陈述一下你知道的张三受伤情况或者你看到的受伤经过？' in seen['content']
+    assert seen['keep_blank_answers'] is True, "留白的答行会被 render_transcript 滤掉"
+    assert seen['role'] == '证人'
+
+
+def test_witness_transcript_without_a_main_transcript_says_so(fresh_window, monkeypatch):
+    """本地那条路要说明白是「固定套路」，别让人以为是依本人笔录生成的。"""
+    w = fresh_window
+    _save_a_case(w)
+    seen = {}
+    _probe(w, monkeypatch, seen, ai_service=None, save_result='假的笔录路径.docx')
+    monkeypatch.setattr(w.file_service, 'open_document', lambda path: (True, ''))
+
+    w._generate_role_transcript('证人')
+
+    assert '固定套路' in w.label_14.text()
+    assert '本人笔录' in w.label_14.text()
+
+
+def test_witness_transcript_feeds_the_main_transcript_to_the_ai(fresh_window, monkeypatch):
+    """★ 有本人笔录 → 走 AI，且那份笔录的**正文**要进提示词。
+
+    只断言「调了 AI」是不够的：真正要防的是「读到了却没传下去」——
+    那样 AI 还是只能编。所以这里在本人笔录里埋一个特征串，去提示词里找它。
+    """
+    w = fresh_window
+    case_id = _save_a_case(w)
+    folder = w._locate_case_dir(case_id)
+    assert folder, "案子存了却没找到案卷目录"
+    _write_transcript(os.path.join(folder, '张三本人谈话笔录.docx'),
+                      ['问：你在公司做什么工作？',
+                       '答：我是电焊工，上的是晚班，从23点到早上7点。'])
+
+    seen = {}
+    _probe(w, monkeypatch, seen, ai_service=object())
+
+    w._generate_role_transcript('证人')
+
+    assert seen.get('ai'), "有本人笔录却没走 AI"
+    assert '我是电焊工，上的是晚班，从23点到早上7点。' in seen['prompt'], \
+        "本人笔录的正文没进提示词——AI 还是只能靠编"
+
+
+def test_witness_transcript_prefers_the_newest_main_transcript(fresh_window, monkeypatch):
+    """★ 有 (2)(3) 副本时取最新的一份。
+
+    副本是重新生成时留下的，新的才是准的——取错了会把上一版已改掉的陈述再喂给 AI。
+
+    摆**三**份、且最新那份是 (3)，这样挑法写错就会被抓住：按文件名排序拿到的是 (2)
+    （`(` 比 `.` 小，所以 `X(2)` 排在 `X.docx` 前面），按 mtime 取最小的拿到的是基础名，
+    两种错法都拿不到 (3)。时间用 os.utime 钉死，不靠写入先后（同一秒写完 mtime 会一样）。
+    """
+    w = fresh_window
+    case_id = _save_a_case(w)
+    folder = w._locate_case_dir(case_id)
+    newest = _write_transcript(os.path.join(folder, '张三本人谈话笔录(3).docx'),
+                               ['答：这是最新版陈述，特征是最新版三个字。'])
+    middle = _write_transcript(os.path.join(folder, '张三本人谈话笔录(2).docx'),
+                               ['答：这是中间版陈述，特征是中间版三个字。'])
+    oldest = _write_transcript(os.path.join(folder, '张三本人谈话笔录.docx'),
+                               ['答：这是最初版陈述，特征是最初版三个字。'])
+    os.utime(oldest, (1_600_000_000, 1_600_000_000))
+    os.utime(middle, (1_600_000_100, 1_600_000_100))
+    os.utime(newest, (1_600_000_200, 1_600_000_200))
+
+    seen = {}
+    _probe(w, monkeypatch, seen, ai_service=object())
+    w._generate_role_transcript('证人')
+
+    assert '最新版陈述' in seen['prompt']
+    assert '中间版陈述' not in seen['prompt'], "取了 (2) 而不是 (3)"
+    assert '最初版陈述' not in seen['prompt'], "取了最初那份"
+
+
+def test_witness_transcript_falls_back_locally_when_no_ai_is_configured(fresh_window, monkeypatch):
+    """★ 有本人笔录但没配 API 密钥 → 退化成本地，并在状态栏说清楚。
+
+    静默退化最坏：用户会以为手上这份是依本人笔录生成的。
+    """
+    w = fresh_window
+    case_id = _save_a_case(w)
+    folder = w._locate_case_dir(case_id)
+    _write_transcript(os.path.join(folder, '张三本人谈话笔录.docx'),
+                      ['答：我是电焊工，上的是晚班。'])
+
+    seen = {}
+    _probe(w, monkeypatch, seen, ai_service=None, save_result='假的笔录路径.docx')
+    monkeypatch.setattr(w.file_service, 'open_document', lambda path: (True, ''))
+
+    w._generate_role_transcript('证人')
+
+    assert 'ai' not in seen, "没配 AI 却去调 AI 了"
+    assert '请介绍一下你的姓名、住址、工作单位以及从事的工作？' in seen['content']
+    assert '未配置AI' in w.label_14.text(), "退化成本地却没告诉用户"
+
+
+def test_an_empty_main_transcript_counts_as_no_transcript(fresh_window, monkeypatch):
+    """★ 本人笔录读出来是空的（损坏/空文件）→ 按「没有」处理。
+
+    拿空文本去问 AI，提示词里 `{% if 本人笔录 %}` 就不成立，AI 反而会自己编；
+    而且「有笔录」这个判断会让它白等一次网络。
+    """
+    w = fresh_window
+    case_id = _save_a_case(w)
+    folder = w._locate_case_dir(case_id)
+    _write_transcript(os.path.join(folder, '张三本人谈话笔录.docx'), ['', '   '])
+
+    assert w._find_main_transcript(case_id) == "", "空笔录该被当成「没有」"
+
+    seen = {}
+    _probe(w, monkeypatch, seen, ai_service=object())
+    w._generate_role_transcript('证人')
+    assert 'ai' not in seen, "空笔录却走了 AI"
+
+
+def test_witness_transcript_only_reads_the_main_transcript(fresh_window, monkeypatch):
+    """别的角色的笔录不能当成本人笔录——文件名里带「本人」两字才算。"""
+    w = fresh_window
+    case_id = _save_a_case(w)
+    folder = w._locate_case_dir(case_id)
+    _write_transcript(os.path.join(folder, '李四证人谈话笔录.docx'),
+                      ['答：这是证人的笔录，不该被当成本人陈述。'])
+
+    assert w._find_main_transcript(case_id) == ""
+    assert w._main_transcript_files(case_id) == []
